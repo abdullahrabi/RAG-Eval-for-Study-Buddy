@@ -2,22 +2,10 @@
 import os
 import time
 import re
-import sys
-import warnings
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime
-
-# Suppress serialization warnings
-warnings.filterwarnings('ignore', message='.*cannot be serialized.*')
-
-# ============================================
-# CRITICAL: Set OTEL environment variables FIRST
-# ============================================
-os.environ["TRULENS_OTEL_TRACING"] = "1"
-os.environ["TRULENS_OTEL_ENABLED"] = "true"
-os.environ["OTEL_SDK_DISABLED"] = "false"
 
 from pinecone import Pinecone
 from google import genai
@@ -35,8 +23,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME", "studybuddy")
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
-APP_NAME = f"RAG_Eval_{RUN_ID}"
-APP_VERSION = "v1.0"
 
 # ============================================
 # 1. CUSTOM EMBEDDING CLASS
@@ -252,7 +238,7 @@ class ModelRouter:
                 response = self.client.chat.completions.create(
                     model=model,
                     messages=[
-                        {"role": "system", "content": "Output ONLY a number between 0 and 1. No other text."},
+                        {"role": "system", "content": "Output ONLY a number between 0 and 1."},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0, max_tokens=10
@@ -265,10 +251,8 @@ class ModelRouter:
                     time.sleep(2)
                 else:
                     return 0.5
-            except Exception as e:
-                if "rate_limit" in str(e).lower():
-                    time.sleep(min(30 * (2 ** attempt), 120))
-                elif attempt < max_retries - 1:
+            except Exception:
+                if attempt < max_retries - 1:
                     time.sleep(5)
                 else:
                     return 0.5
@@ -325,7 +309,7 @@ Score:"""
     return router.evaluate('correctness', prompt)
 
 # ============================================
-# 5. MAIN EXECUTION (Returns DataFrame)
+# 5. MAIN EXECUTION
 # ============================================
 
 def run_evaluation(eval_questions=None):
@@ -333,11 +317,7 @@ def run_evaluation(eval_questions=None):
     
     if eval_questions is None:
         eval_questions = [
-            "What is an alphabet in automata theory?",
-            "What is the symbol used to denote the empty string?",
-            "What is the Kleene star operator used for?",
-            "What is a formal language?",
-            "What is the difference between ∅ and {ε}?",
+            
             "Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z], what pattern does it represent and what is its limitation?",
             "List three software applications using automata.",
         ]
