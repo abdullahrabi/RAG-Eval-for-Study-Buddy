@@ -7,7 +7,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime
 import json
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 
 warnings.filterwarnings('ignore')
@@ -35,7 +35,6 @@ print(f"INDEX_NAME: {INDEX_NAME}")
 if not GEMINI_API_KEY or not PINECONE_API_KEY or not GROQ_API_KEY:
     print("\n⚠️ SOME ENVIRONMENT VARIABLES ARE MISSING!")
     print("="*60)
-    # Don't exit - let the API still run but return errors
 else:
     print("✅ All required environment variables loaded successfully!")
     print("="*60)
@@ -60,18 +59,116 @@ from trulens.apps.app import TruApp
 # ============================================
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for your Streamlit chatbot
+CORS(app)
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 APP_NAME = f"RAG_Eval_API_{RUN_ID}"
 
-# Global variables for RAG components
+# Global variables
 rag_wrapper = None
 tru_app = None
 session = None
 
 # ============================================
-# EMBEDDING
+# DASHBOARD HTML
+# ============================================
+
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RAG Evaluation Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f7fa; }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: 10px 0; }
+        .metric { display: inline-block; margin: 10px; padding: 15px 25px; background: #ecf0f1; border-radius: 8px; }
+        .metric .value { font-size: 24px; font-weight: bold; }
+        .green { color: #27ae60; }
+        .yellow { color: #f39c12; }
+        .red { color: #e74c3c; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #3498db; color: white; }
+        tr:hover { background: #f1f1f1; }
+        .btn { display: inline-block; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px; margin: 5px; border: none; cursor: pointer; }
+        .btn:hover { background: #2980b9; }
+        .btn-danger { background: #e74c3c; }
+        .btn-danger:hover { background: #c0392b; }
+        .status { padding: 15px; border-radius: 5px; margin: 10px 0; }
+        .status.info { background: #d1ecf1; color: #0c5460; }
+        .status.success { background: #d4edda; color: #155724; }
+        .status.error { background: #f8d7da; color: #721c24; }
+    </style>
+    <script>
+        async function refreshData() {
+            document.getElementById('loading').style.display = 'block';
+            const response = await fetch('/results');
+            const data = await response.json();
+            document.getElementById('loading').style.display = 'none';
+            
+            if (data.status === 'success' && data.count > 0) {
+                document.getElementById('results').innerHTML = renderResults(data);
+            } else {
+                document.getElementById('results').innerHTML = '<div class="status info">No records found. Send some evaluations first!</div>';
+            }
+        }
+        
+        function renderResults(data) {
+            let html = `<div class="card">
+                <h3>📊 Summary</h3>
+                <div class="metric"><strong>Total Records:</strong> <span class="value">${data.count}</span></div>`;
+            
+            // Calculate averages
+            if (data.records.length > 0) {
+                const metrics = ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness'];
+                let avgHtml = '';
+                metrics.forEach(m => {
+                    if (data.records[0][m] !== undefined) {
+                        const avg = data.records.reduce((sum, r) => sum + (r[m] || 0), 0) / data.records.length;
+                        const color = avg >= 0.7 ? 'green' : avg >= 0.5 ? 'yellow' : 'red';
+                        avgHtml += `<div class="metric"><strong>${m}:</strong> <span class="value ${color}">${(avg * 100).toFixed(1)}%</span></div>`;
+                    }
+                });
+                html += avgHtml;
+            }
+            
+            html += `</div><div class="card">
+                <h3>📝 Records</h3>
+                <table>
+                    <tr><th>#</th><th>Question</th><th>Answer</th><th>Relevance</th><th>Quality</th><th>Groundedness</th></tr>`;
+            
+            data.records.forEach((r, i) => {
+                html += `<tr>
+                    <td>${i + 1}</td>
+                    <td>${r.input ? r.input.substring(0, 100) + '...' : 'N/A'}</td>
+                    <td>${r.output ? r.output.substring(0, 150) + '...' : 'N/A'}</td>
+                    <td style="color: ${(r.relevance || 0) >= 0.7 ? 'green' : (r.relevance || 0) >= 0.5 ? 'orange' : 'red'}">${(r.relevance || 0).toFixed(3)}</td>
+                    <td style="color: ${(r.quality || 0) >= 0.7 ? 'green' : (r.quality || 0) >= 0.5 ? 'orange' : 'red'}">${(r.quality || 0).toFixed(3)}</td>
+                    <td style="color: ${(r.groundedness || 0) >= 0.7 ? 'green' : (r.groundedness || 0) >= 0.5 ? 'orange' : 'red'}">${(r.groundedness || 0).toFixed(3)}</td>
+                </tr>`;
+            });
+            
+            html += `</table></div>
+                <a href="/results/csv" class="btn">📥 Download CSV</a>
+                <button class="btn" onclick="refreshData()">🔄 Refresh</button>`;
+            
+            return html;
+        }
+        
+        document.addEventListener('DOMContentLoaded', refreshData);
+    </script>
+</head>
+<body>
+    <h1>🔍 RAG Evaluation Dashboard</h1>
+    <div id="loading" style="display: none;">Loading...</div>
+    <div id="results"></div>
+</body>
+</html>
+"""
+
+# ============================================
+# EMBEDDING (unchanged)
 # ============================================
 
 class GeminiDirectEmbedding(BaseEmbedding):
@@ -125,7 +222,7 @@ class GeminiDirectEmbedding(BaseEmbedding):
         return "GeminiDirectEmbedding"
 
 # ============================================
-# RAG - Modified to accept pre-fetched context
+# RAG (unchanged)
 # ============================================
 
 class OptimizedRAG:
@@ -135,7 +232,6 @@ class OptimizedRAG:
         self.llm = llm
     
     def query(self, question: str) -> tuple:
-        """Returns (answer, contexts)"""
         try:
             query_embedding = self.embed_model._embed_text(question)
             if not query_embedding:
@@ -167,7 +263,6 @@ ANSWER:"""
             return f"Error: {e}", []
     
     def query_with_context(self, question: str, contexts: list) -> str:
-        """Answer using provided context (for live eval)"""
         try:
             if not contexts:
                 return "No context provided."
@@ -188,7 +283,7 @@ ANSWER:"""
             return f"Error: {e}"
 
 # ============================================
-# MODEL ROUTER
+# MODEL ROUTER (unchanged)
 # ============================================
 
 class ModelRouter:
@@ -217,7 +312,7 @@ class ModelRouter:
         return 0.5
 
 # ============================================
-# TRULENS FEEDBACK
+# TRULENS FEEDBACK (unchanged)
 # ============================================
 
 router = None
@@ -247,7 +342,6 @@ def correctness(input: str, output: str) -> float:
 # ============================================
 
 def initialize_rag():
-    """Initialize the RAG system once at startup"""
     global rag_wrapper, tru_app, session
     
     print("\n" + "="*60)
@@ -278,11 +372,9 @@ def initialize_rag():
         
         rag_wrapper = RAGWrapper()
         
-        # Database connection
         session = TruSession(database_url="sqlite:///trulens.db")
         print("✅ Database connection established.")
         
-        # Setup feedback functions
         f_relevance = Feedback(relevance, name="Relevance").on_input_output()
         f_quality = Feedback(quality, name="Quality").on_input_output()
         f_groundedness = Feedback(groundedness, name="Groundedness").on_input_output()
@@ -310,9 +402,13 @@ def initialize_rag():
 # API ENDPOINTS
 # ============================================
 
+@app.route('/')
+def home():
+    """Dashboard homepage"""
+    return render_template_string(DASHBOARD_HTML)
+
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat()
@@ -321,17 +417,24 @@ def health():
 @app.route('/evaluate', methods=['POST'])
 def evaluate():
     """
-    Evaluate a single question with provided context
-    
-    Expected JSON:
-    {
-        "question": "What is...",
-        "contexts": ["context1", "context2", ...],  # Optional - if not provided, will fetch from Pinecone
-        "answer": "Optional - if provided, skips LLM generation"
-    }
+    Evaluate a single question - FIXED with direct database insert
     """
     try:
-        data = request.get_json()
+        # Get raw data first
+        raw_data = request.get_data(as_text=True)
+        print(f"📥 Raw data received: {raw_data[:200]}...")
+        
+        # Parse JSON
+        try:
+            data = json.loads(raw_data)
+        except:
+            data = request.get_json()
+        
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except:
+                return jsonify({"error": "Invalid JSON format", "status": "error"}), 400
         
         if not data or 'question' not in data:
             return jsonify({
@@ -340,45 +443,90 @@ def evaluate():
             }), 400
         
         question = data['question']
-        provided_contexts = data.get('contexts', [])
-        provided_answer = data.get('answer', None)
+        answer = data.get('answer', '')
+        contexts = data.get('contexts', [])
+        user_id = data.get('user_id', 'default')
         
         print(f"\n📝 Evaluating: {question[:50]}...")
+        print(f"   Answer length: {len(answer)} chars")
+        print(f"   Contexts: {len(contexts)} passages")
         
-        # Get answer and contexts
-        if provided_answer:
-            # Use provided answer
-            answer = provided_answer
-            contexts = provided_contexts
-        else:
-            # Generate answer using RAG
-            if provided_contexts:
-                # Use provided contexts
-                answer = rag_wrapper.respond_with_context(question, provided_contexts)
-                contexts = provided_contexts
+        # ============================================
+        # OPTION 2: DIRECT DATABASE INSERT
+        # ============================================
+        
+        try:
+            # Method 1: Use tru_app context manager
+            if tru_app is not None and rag_wrapper is not None:
+                with tru_app as recording:
+                    # This records the interaction
+                    rag_wrapper.respond_with_context(question, contexts)
+                print("   ✅ Recorded via tru_app")
             else:
-                # Fetch from Pinecone and generate
-                # We need to call rag.query directly to get contexts
-                embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
-                llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
-                pc = Pinecone(api_key=PINECONE_API_KEY)
-                pinecone_index = pc.Index(INDEX_NAME)
-                temp_rag = OptimizedRAG(pinecone_index, embed_model, llm)
-                answer, contexts = temp_rag.query(question)
-        
-        # Record with TruLens
-        with tru_app as recording:
-            # Simulate the response in TruLens
-            rag_wrapper.respond_with_context(question, contexts)
+                print("   ⚠️ tru_app not available, using direct insert")
+                
+                # Method 2: Direct insert into database
+                from trulens.core.record import Record
+                
+                record = Record(
+                    app_id=APP_NAME,
+                    main_input=question,
+                    main_output=answer,
+                    meta={
+                        "contexts": contexts,
+                        "user_id": user_id,
+                        "context_count": len(contexts)
+                    }
+                )
+                
+                # Insert using session
+                session.records.insert(record)
+                session.connector.db.commit()
+                print("   ✅ Record inserted directly")
+                
+        except Exception as db_error:
+            print(f"   ⚠️ Recording error: {db_error}")
+            # Method 3: Manual insert as fallback
+            try:
+                db = session.connector.db
+                from trulens.core.database.orm import Record as ORMRecord
+                
+                new_record = ORMRecord(
+                    app_id=APP_NAME,
+                    main_input=question,
+                    main_output=answer,
+                    meta=json.dumps({
+                        "contexts": contexts,
+                        "user_id": user_id
+                    })
+                )
+                db.add(new_record)
+                db.commit()
+                print("   ✅ Record inserted via ORM fallback")
+            except Exception as e2:
+                print(f"   ❌ All insert methods failed: {e2}")
+                return jsonify({
+                    "error": f"Database insert failed: {str(e2)}",
+                    "status": "error"
+                }), 500
         
         # Wait for feedback to compute
-        time.sleep(5)
+        time.sleep(3)
+        
+        # Verify
+        try:
+            records_df, _ = session.get_records_and_feedback(app_name=APP_NAME)
+            count = len(records_df) if records_df is not None else 0
+            print(f"   📊 Database now has {count} records")
+        except:
+            pass
         
         return jsonify({
             "status": "success",
             "question": question,
-            "answer": answer,
-            "contexts": contexts,
+            "answer": answer[:200] + "..." if len(answer) > 200 else answer,
+            "contexts_count": len(contexts),
+            "user_id": user_id,
             "timestamp": datetime.now().isoformat()
         })
         
@@ -393,17 +541,6 @@ def evaluate():
 
 @app.route('/evaluate_batch', methods=['POST'])
 def evaluate_batch():
-    """
-    Evaluate multiple questions in batch
-    
-    Expected JSON:
-    {
-        "questions": [
-            {"question": "Q1", "contexts": [...], "answer": "..."},
-            {"question": "Q2", "contexts": [...], "answer": "..."}
-        ]
-    }
-    """
     try:
         data = request.get_json()
         
@@ -416,36 +553,46 @@ def evaluate_batch():
         questions = data['questions']
         results = []
         
-        with tru_app as recording:
-            for q_data in questions:
-                question = q_data['question']
-                contexts = q_data.get('contexts', [])
-                provided_answer = q_data.get('answer', None)
-                
-                # Get answer
-                if provided_answer:
-                    answer = provided_answer
+        for q_data in questions:
+            question = q_data['question']
+            contexts = q_data.get('contexts', [])
+            provided_answer = q_data.get('answer', None)
+            
+            if provided_answer:
+                answer = provided_answer
+            else:
+                if contexts:
+                    answer = rag_wrapper.respond_with_context(question, contexts)
                 else:
-                    if contexts:
-                        answer = rag_wrapper.respond_with_context(question, contexts)
-                    else:
-                        embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
-                        llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
-                        pc = Pinecone(api_key=PINECONE_API_KEY)
-                        pinecone_index = pc.Index(INDEX_NAME)
-                        temp_rag = OptimizedRAG(pinecone_index, embed_model, llm)
-                        answer, contexts = temp_rag.query(question)
-                
-                # Record in TruLens
-                rag_wrapper.respond_with_context(question, contexts)
-                
-                results.append({
-                    "question": question,
-                    "answer": answer,
-                    "contexts": contexts
-                })
+                    embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
+                    llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
+                    pc = Pinecone(api_key=PINECONE_API_KEY)
+                    pinecone_index = pc.Index(INDEX_NAME)
+                    temp_rag = OptimizedRAG(pinecone_index, embed_model, llm)
+                    answer, contexts = temp_rag.query(question)
+            
+            # Record each
+            try:
+                with tru_app as recording:
+                    rag_wrapper.respond_with_context(question, contexts)
+            except:
+                from trulens.core.record import Record
+                record = Record(
+                    app_id=APP_NAME,
+                    main_input=question,
+                    main_output=answer,
+                    meta={"contexts": contexts}
+                )
+                session.records.insert(record)
+                session.connector.db.commit()
+            
+            results.append({
+                "question": question,
+                "answer": answer,
+                "contexts": contexts
+            })
         
-        time.sleep(10)  # Wait for feedback computation
+        time.sleep(5)
         
         return jsonify({
             "status": "success",
@@ -465,12 +612,10 @@ def evaluate_batch():
 
 @app.route('/results', methods=['GET'])
 def get_results():
-    """Get all evaluation results"""
     try:
         records_df, feedback_names = session.get_records_and_feedback(app_name=APP_NAME)
         
         if records_df is not None and len(records_df) > 0:
-            # Convert to JSON
             records = records_df.to_dict(orient='records')
             return jsonify({
                 "status": "success",
@@ -493,7 +638,6 @@ def get_results():
 
 @app.route('/results/csv', methods=['GET'])
 def get_results_csv():
-    """Download results as CSV"""
     try:
         records_df, feedback_names = session.get_records_and_feedback(app_name=APP_NAME)
         
@@ -521,12 +665,12 @@ def get_results_csv():
 # ============================================
 
 if __name__ == "__main__":
-    # Initialize RAG system
     if initialize_rag():
         print("\n" + "="*60)
         print("🚀 Starting Flask API Server...")
         print("="*60)
         print("\n📌 Available Endpoints:")
+        print("  GET  /                 - Dashboard (HTML)")
         print("  GET  /health           - Health check")
         print("  POST /evaluate         - Evaluate single question")
         print("  POST /evaluate_batch   - Evaluate multiple questions")
@@ -535,7 +679,6 @@ if __name__ == "__main__":
         print("\n🌐 Dashboard: https://rag-eval-for-study-buddy-production.up.railway.app")
         print("="*60)
         
-        # Run the Flask app
         app.run(host='0.0.0.0', port=8501, debug=False)
     else:
         print("\n❌ Failed to initialize RAG system.")
