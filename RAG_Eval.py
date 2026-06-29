@@ -13,15 +13,6 @@ os.environ["TRULENS_OTEL_TRACING"] = "1"
 os.environ["TRULENS_OTEL_ENABLED"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "false"
 
-# ===== FIX: Delete old TruLens DB on cloud =====
-if os.path.exists("default.sqlite"):
-    try:
-        os.remove("default.sqlite")
-        print("🗑️ Cleared old TruLens database")
-    except:
-        pass
-# =============================================
-
 from pinecone import Pinecone
 from google import genai
 from google.genai import types
@@ -29,6 +20,7 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 from trulens.core import TruSession, Feedback
+from trulens.core.database.connector.default import DefaultDBConnector
 from trulens.apps.app import TruApp
 
 load_dotenv()
@@ -217,8 +209,9 @@ def main():
     
     rag_wrapper = RAGWrapper()
     
-    # TruLens with fresh DB
-    session = TruSession()
+    # TruLens with IN-MEMORY SQLite (Cloud safe)
+    connector = DefaultDBConnector(database_url="sqlite:///:memory:")
+    session = TruSession(connector=connector)
     
     f_relevance = Feedback(relevance, name="Relevance").on_input_output()
     f_quality = Feedback(quality, name="Quality").on_input_output()
@@ -235,7 +228,7 @@ def main():
     )
     
     questions = [
-        
+       
         "Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z], what pattern does it represent and what is its limitation?",
         "List three software applications using automata.",
     ]
@@ -247,7 +240,7 @@ def main():
             rag_wrapper.respond(q)
     
     print("✅ Recording complete")
-    print("\n⏳ Waiting for TruLens feedback...")
+    print("\n⏳ Computing TruLens feedback...")
     time.sleep(30)
     
     try:
@@ -256,16 +249,21 @@ def main():
         
         if records_df is not None and len(records_df) > 0:
             records_df.to_csv(f"trulens_records_{RUN_ID}.csv", index=False)
-            print(f"✅ TruLens records: {len(records_df)}")
+            print(f"\n✅ TruLens Records: {len(records_df)}")
             
-            feedback_cols = ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness']
-            for col in feedback_cols:
+            print("\n📊 TruLens Metrics:")
+            for col in ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness']:
                 if col in records_df.columns:
-                    print(f"  {col}: {records_df[col].mean():.3f}")
+                    avg = records_df[col].mean()
+                    status = "✅" if avg >= 0.7 else "⚠️" if avg >= 0.5 else "❌"
+                    print(f"  {status} {col}: {avg:.3f}")
+        else:
+            print("⚠️ No records found")
     except Exception as e:
-        print(f"⚠️ Error: {e}")
+        print(f"⚠️ Feedback error: {e}")
     
     print(f"\n📱 App: {APP_NAME}")
+    print(f"📁 CSV: trulens_records_{RUN_ID}.csv")
 
 if __name__ == "__main__":
     main()
