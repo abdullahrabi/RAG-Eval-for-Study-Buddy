@@ -19,6 +19,7 @@ llama-index-llms-groq
 # TruLens
 trulens-core
 trulens-apps-llamaindex
+trulens-feedback
 
 jsonschema 
 torch 
