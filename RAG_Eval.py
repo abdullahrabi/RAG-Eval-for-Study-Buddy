@@ -1,4 +1,4 @@
-# RAG_Eval.py - Completely fixed version
+# RAG_Eval.py - Pure evaluation with dashboard
 import os
 import time
 import re
@@ -6,7 +6,8 @@ import warnings
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime
-import streamlit as st
+import subprocess
+import sys
 
 warnings.filterwarnings('ignore')
 
@@ -21,10 +22,9 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports - FIXED
+# TruLens imports
 from trulens.core import TruSession, Feedback
 from trulens.core.database.sqlalchemy import SQLAlchemyDB
-from trulens.core.database.connector import DBConnector
 from trulens.apps.app import TruApp
 
 load_dotenv()
@@ -188,41 +188,33 @@ def correctness(input: str, output: str) -> float:
     return get_router().call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
 
 # ============================================
-# EVALUATION FUNCTIONS
+# EVALUATION
 # ============================================
 
 def run_evaluation():
     """Run the RAG evaluation"""
     
-    with st.spinner("Initializing RAG system..."):
-        embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
-        llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
-        Settings.embed_model = embed_model
-        Settings.llm = llm
-        
-        pc = Pinecone(api_key=PINECONE_API_KEY)
-        pinecone_index = pc.Index(INDEX_NAME)
-        rag = OptimizedRAG(pinecone_index, embed_model, llm)
-        
-        class RAGWrapper:
-            def respond(self, question: str) -> str:
-                return rag.query(question)
-        
-        rag_wrapper = RAGWrapper()
+    print("Initializing RAG system...")
     
-    # Use persistent database
+    embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
+    llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
+    Settings.embed_model = embed_model
+    Settings.llm = llm
+    
+    pc = Pinecone(api_key=PINECONE_API_KEY)
+    pinecone_index = pc.Index(INDEX_NAME)
+    rag = OptimizedRAG(pinecone_index, embed_model, llm)
+    
+    class RAGWrapper:
+        def respond(self, question: str) -> str:
+            return rag.query(question)
+    
+    rag_wrapper = RAGWrapper()
+    
+    # Database connection
     db_path = "trulens.db"
-    
-    # Create SQLAlchemy DB
-    try:
-        db = SQLAlchemyDB.from_db_url(f"sqlite:///{db_path}")
-        connector = DBConnector(db=db)
-    except Exception as e:
-        st.error(f"Database error: {e}")
-        return False
-    
-    # Create session
-    session = TruSession(connector=connector)
+    db = SQLAlchemyDB.from_db_url(f"sqlite:///{db_path}")
+    session = TruSession(db=db)
     
     # Setup feedback functions
     f_relevance = Feedback(relevance, name="Relevance").on_input_output()
@@ -246,194 +238,45 @@ def run_evaluation():
     ]
     
     # Run evaluation
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    print(f"\n📊 Running evaluation with {len(questions)} questions...")
     
     with tru_app as recording:
         for i, q in enumerate(questions, 1):
-            status_text.text(f"Processing question {i}/{len(questions)}: {q[:50]}...")
+            print(f"  {i}/{len(questions)}: {q[:50]}...")
             rag_wrapper.respond(q)
-            progress_bar.progress(i / len(questions))
     
-    status_text.text("Computing feedback scores...")
-    time.sleep(30)  # Allow time for feedback computation
+    print("⏳ Computing feedback scores...")
+    time.sleep(30)
     
-    try:
-        tru_app.wait_for_feedback_results()
-        records_df, feedback_names = session.get_records_and_feedback(app_name=APP_NAME)
-        
-        if records_df is not None and len(records_df) > 0:
-            # Store in session state
-            st.session_state['records_df'] = records_df
-            st.session_state['feedback_names'] = feedback_names
-            st.session_state['app_name'] = APP_NAME
-            st.session_state['evaluation_done'] = True
-            
-            # Save to CSV
-            records_df.to_csv(f"trulens_records_{RUN_ID}.csv", index=False)
-            
-            status_text.text("✅ Evaluation complete!")
-            progress_bar.progress(1.0)
-            return True
-        else:
-            st.error("No records found from evaluation")
-            return False
-    except Exception as e:
-        st.error(f"Error during evaluation: {str(e)[:200]}")
-        return False
-
-def show_dashboard():
-    """Display the evaluation dashboard"""
+    tru_app.wait_for_feedback_results()
+    records_df, feedback_names = session.get_records_and_feedback(app_name=APP_NAME)
     
-    if 'records_df' not in st.session_state:
-        st.warning("No evaluation data found. Please run the evaluation first.")
-        return
-    
-    records_df = st.session_state['records_df']
-    
-    st.header("📊 TruLens Evaluation Dashboard")
-    
-    # Summary metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    metric_cols = ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness']
-    available_metrics = [col for col in metric_cols if col in records_df.columns]
-    
-    with col1:
-        st.metric("Total Records", len(records_df))
-    
-    if available_metrics:
-        with col2:
-            avg_score = records_df[available_metrics].mean().mean()
-            st.metric("Average Score", f"{avg_score:.3f}")
-        
-        with col3:
-            min_score = records_df[available_metrics].min().min()
-            st.metric("Min Score", f"{min_score:.3f}")
-        
-        with col4:
-            max_score = records_df[available_metrics].max().max()
-            st.metric("Max Score", f"{max_score:.3f}")
-    
-    # Metrics visualization
-    st.subheader("📈 Performance Metrics")
-    
-    if available_metrics:
-        # Create columns for metrics
-        cols = st.columns(len(available_metrics))
-        
-        for idx, metric in enumerate(available_metrics):
-            with cols[idx]:
-                mean_val = records_df[metric].mean()
-                median_val = records_df[metric].median()
-                std_val = records_df[metric].std()
-                
-                # Color coding
-                color = "🟢" if mean_val >= 0.7 else "🟡" if mean_val >= 0.5 else "🔴"
-                
-                st.metric(
-                    f"{color} {metric}",
-                    f"{mean_val:.3f}",
-                    delta=f"±{std_val:.3f}",
-                    delta_color="off"
-                )
-                st.caption(f"Median: {median_val:.3f}")
-    
-    # Score distribution
-    if available_metrics:
-        st.subheader("📊 Score Distribution")
-        
-        # Create a bar chart
-        chart_data = pd.DataFrame()
-        for metric in available_metrics:
-            chart_data[metric] = records_df[metric]
-        
-        # Show statistics
-        st.dataframe(chart_data.describe(), use_container_width=True)
-        
-        # Individual records
-        st.subheader("📝 Detailed Records")
-        
-        with st.expander("View all records"):
-            display_cols = ['input', 'output'] + available_metrics
-            available_display_cols = [col for col in display_cols if col in records_df.columns]
-            
-            if available_display_cols:
-                display_df = records_df[available_display_cols].copy()
-                for col in ['input', 'output']:
-                    if col in display_df.columns:
-                        display_df[col] = display_df[col].str[:200] + "..."
-                
-                st.dataframe(display_df, use_container_width=True, height=400)
-        
-        # Export option
-        col1, col2 = st.columns(2)
-        with col1:
-            csv = records_df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv,
-                file_name=f"trulens_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        
-        with col2:
-            if st.button("🔄 Run New Evaluation", use_container_width=True):
-                st.session_state['evaluation_done'] = False
-                st.rerun()
-    
-    # App info
-    if 'app_name' in st.session_state:
-        st.sidebar.success(f"📱 App: {st.session_state['app_name']}")
-    
-    if 'feedback_names' in st.session_state and st.session_state['feedback_names']:
-        st.sidebar.subheader("📋 Feedback Functions")
-        for fb in st.session_state['feedback_names']:
-            st.sidebar.write(f"✅ {fb}")
-
-# ============================================
-# MAIN STREAMLIT APP
-# ============================================
-
-st.set_page_config(page_title="RAG Evaluation with TruLens", layout="wide")
-
-def main():
-    st.title("🔍 RAG Evaluation with TruLens")
-    
-    # Sidebar
-    st.sidebar.header("⚙️ Configuration")
-    st.sidebar.info(f"Index: {INDEX_NAME}")
-    st.sidebar.info(f"Run ID: {RUN_ID}")
-    
-    # Initialize session state
-    if 'evaluation_done' not in st.session_state:
-        st.session_state['evaluation_done'] = False
-    
-    # Show content based on state
-    if not st.session_state['evaluation_done']:
-        st.info("Click the button below to start the RAG evaluation.")
-        
-        # Questions preview
-        with st.expander("📝 Evaluation Questions"):
-            questions = [
-                "Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z], what pattern does it represent and what is its limitation?",
-                "List three software applications using automata.",
-            ]
-            for i, q in enumerate(questions, 1):
-                st.write(f"{i}. {q}")
-        
-        if st.button("🚀 Run Evaluation", type="primary", use_container_width=True):
-            success = run_evaluation()
-            if success:
-                st.rerun()
+    if records_df is not None and len(records_df) > 0:
+        print(f"✅ Evaluation complete! {len(records_df)} records saved.")
+        records_df.to_csv(f"trulens_records_{RUN_ID}.csv", index=False)
+        return session
     else:
-        # Show the dashboard
-        show_dashboard()
-    
-    # Footer
-    st.sidebar.markdown("---")
-    st.sidebar.caption(f"Built with TruLens • {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        print("❌ No records found")
+        return None
+
+# ============================================
+# MAIN - RUN EVALUATION THEN DASHBOARD
+# ============================================
 
 if __name__ == "__main__":
-    main()
+    print("="*60)
+    print("🔍 RAG Evaluation with TruLens")
+    print("="*60)
+    
+    # Run evaluation
+    session = run_evaluation()
+    
+    if session:
+        print("\n" + "="*60)
+        print("📊 Launching TruLens Dashboard...")
+        print("="*60)
+        print("\n🌐 Dashboard will open at: http://localhost:8501")
+        print("💡 Press Ctrl+C to stop the dashboard\n")
+        
+        # Launch the dashboard
+        session.run_dashboard(port=8501)
