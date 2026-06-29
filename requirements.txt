@@ -4,7 +4,7 @@ numpy
 pandas
 
 # Google Generative AI
-google-generativeai
+ google-genai
 
 # Pinecone
 pinecone
