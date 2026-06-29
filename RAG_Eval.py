@@ -1,4 +1,4 @@
-# trulens_app.py
+# RAG_Eval.py - Fixed version
 import os
 import time
 import re
@@ -26,7 +26,6 @@ from trulens.core import TruSession, Feedback
 from trulens.core.database.connector.default import DefaultDBConnector
 from trulens.core.database.sqlalchemy import SQLAlchemyDB
 from trulens.apps.app import TruApp
-from trulens.dashboard import run_dashboard
 
 load_dotenv()
 
@@ -213,10 +212,18 @@ def run_evaluation():
         
         rag_wrapper = RAGWrapper()
     
-    # Use persistent database
+    # Use persistent database - FIXED CONNECTION
     db_path = "trulens.db"
     db = SQLAlchemyDB.from_db_url(f"sqlite:///{db_path}")
-    connector = DefaultDBConnector(db=db)
+    
+    # Create connector differently for newer versions
+    try:
+        # Try new API
+        connector = DefaultDBConnector(db)
+    except TypeError:
+        # Fallback to old API
+        connector = DefaultDBConnector(db=db)
+    
     session = TruSession(connector=connector)
     
     # Setup feedback functions
