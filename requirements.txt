@@ -2,7 +2,7 @@
 python-dotenv
 numpy
 pandas
-
+streamlit
 # Google Generative AI
  google-genai
 
