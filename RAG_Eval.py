@@ -1,4 +1,4 @@
-# RAG_Eval.py - Fixed with proper environment variable handling
+# RAG_Eval.py - Final Working Version
 import os
 import time
 import re
@@ -7,47 +7,37 @@ import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime
 import sys
+import subprocess
 
 warnings.filterwarnings('ignore')
 
 # ============================================
-# ENVIRONMENT VARIABLE LOADING - FIXED
+# ENVIRONMENT VARIABLE LOADING
 # ============================================
 
-# Try to load .env file (works locally)
 load_dotenv()
 
-# Debug: Check if variables are loaded
 print("="*60)
 print("🔍 ENVIRONMENT VARIABLE CHECK")
 print("="*60)
 
-# Try multiple sources for each variable
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or os.environ.get("PINECONE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME") or os.environ.get("INDEX_NAME", "studybuddy")
 
-# Debug prints
 print(f"GEMINI_API_KEY loaded: {'✅' if GEMINI_API_KEY else '❌'} (length: {len(GEMINI_API_KEY) if GEMINI_API_KEY else 0})")
 print(f"PINECONE_API_KEY loaded: {'✅' if PINECONE_API_KEY else '❌'} (length: {len(PINECONE_API_KEY) if PINECONE_API_KEY else 0})")
 print(f"GROQ_API_KEY loaded: {'✅' if GROQ_API_KEY else '❌'} (length: {len(GROQ_API_KEY) if GROQ_API_KEY else 0})")
 print(f"INDEX_NAME: {INDEX_NAME}")
 
-# If any are missing, show all environment variables (for debugging)
 if not GEMINI_API_KEY or not PINECONE_API_KEY or not GROQ_API_KEY:
     print("\n⚠️ SOME ENVIRONMENT VARIABLES ARE MISSING!")
-    print("Available environment variables:")
-    for key in os.environ.keys():
-        if any(api in key.upper() for api in ['GEMINI', 'PINECONE', 'GROQ', 'INDEX']):
-            print(f"  {key}: {'***' if key not in ['INDEX_NAME'] else os.environ[key]}")
     print("="*60)
-    # Don't exit - let the user see the error
 else:
     print("✅ All required environment variables loaded successfully!")
     print("="*60)
 
-# Rest of your code continues here...
 os.environ["TRULENS_OTEL_TRACING"] = "1"
 os.environ["TRULENS_OTEL_ENABLED"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "false"
@@ -59,9 +49,8 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports
+# TruLens imports - CORRECT WAY
 from trulens.core import TruSession, Feedback
-from trulens.core.database.sqlalchemy import SQLAlchemyDB
 from trulens.apps.app import TruApp
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -255,22 +244,12 @@ def run_evaluation():
         
         rag_wrapper = RAGWrapper()
         
-        # Database connection
-        db_path = "trulens.db"
-        db = SQLAlchemyDB.from_db_url(f"sqlite:///{db_path}")
-        
-        # Try different session creation methods
-        try:
-            session = TruSession(db=db)
-        except:
-            try:
-                from trulens.core.database.connector import DBConnector
-                connector = DBConnector()
-                connector.db = db
-                session = TruSession(connector=connector)
-            except:
-                session = TruSession()
-                session.db = db
+        # ============================================
+        # DATABASE CONNECTION - CORRECT WAY
+        # ============================================
+        # Using the officially recommended method to connect to a SQLite database
+        session = TruSession(database_url="sqlite:///trulens.db")
+        print("✅ Database connection established.")
         
         # Setup feedback functions
         f_relevance = Feedback(relevance, name="Relevance").on_input_output()
@@ -333,17 +312,22 @@ if __name__ == "__main__":
         print("📊 Launching TruLens Dashboard...")
         print("="*60)
         print("\n🌐 Dashboard will open at: http://localhost:8501")
-        print("💡 Press Ctrl+C to stop the dashboard\n")
+        print("✅ Dashboard is running. Press Ctrl+C to stop.\n")
         
-        # Try to launch the dashboard using different methods
+        # Launch dashboard as a subprocess and keep it running
         try:
-            session.run_dashboard(port=8501)
+            # Try the session method first
+            session.run_dashboard(port=8501, host="0.0.0.0")
         except Exception as e:
-            print(f"Failed to launch dashboard via session: {e}")
+            print(f"Session dashboard failed: {e}")
             try:
-                from trulens.dashboard import run_dashboard
-                run_dashboard(port=8501)
-            except:
-                print("Could not launch dashboard. Check your TruLens installation.")
+                # Fallback: Use subprocess
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "trulens.dashboard", "--port", "8501", "--host", "0.0.0.0"]
+                )
+                print(f"✅ Dashboard process started (PID: {process.pid})")
+                process.wait()
+            except Exception as e2:
+                print(f"Could not launch dashboard: {e2}")
     else:
         print("\n❌ Evaluation failed. Check the logs above.")
