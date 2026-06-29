@@ -1,0 +1,10 @@
+What is an alphabet in the context of automata theory?
+What is the symbol used to denote the empty string?
+What is the Kleene star operator (Σ*) used for?
+What is a formal language?
+According to the text, what is the difference between the empty language (∅) and the language containing only the empty string ({ε})?
+List at least three different software applications mentioned in the text where the concepts from automata theory (like finite automata) are used.
+Explain the difference between concatenating two strings and concatenating two languages. Provide an example for each.
+Why is the empty string (ε) considered the identity for string concatenation?
+A language L is defined as {0ⁿ1ⁿ | n ≥ 1}. Write out the first three strings of this language.
+Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z] from the text, what pattern in text does it represent, and what is its limitation as mentioned in the PDF?

@@ -1,0 +1,20 @@
+# Python 3.11 Required - Do not use other versions
+python-dotenv
+numpy
+pandas
+
+# Google Generative AI
+google-generativeai
+
+# Pinecone
+pinecone
+
+# Groq
+groq
+
+# LlamaIndex
+llama-index-core
+llama-index-llms-groq
+
+# TruLens
+trulens-core
