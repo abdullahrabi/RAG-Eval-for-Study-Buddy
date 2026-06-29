@@ -1,4 +1,4 @@
-# RAG_Eval.py - Pure evaluation with dashboard
+# RAG_Eval.py - Fixed with proper environment variable handling
 import os
 import time
 import re
@@ -6,11 +6,48 @@ import warnings
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime
-import subprocess
 import sys
 
 warnings.filterwarnings('ignore')
 
+# ============================================
+# ENVIRONMENT VARIABLE LOADING - FIXED
+# ============================================
+
+# Try to load .env file (works locally)
+load_dotenv()
+
+# Debug: Check if variables are loaded
+print("="*60)
+print("🔍 ENVIRONMENT VARIABLE CHECK")
+print("="*60)
+
+# Try multiple sources for each variable
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or os.environ.get("PINECONE_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+INDEX_NAME = os.getenv("INDEX_NAME") or os.environ.get("INDEX_NAME", "studybuddy")
+
+# Debug prints
+print(f"GEMINI_API_KEY loaded: {'✅' if GEMINI_API_KEY else '❌'} (length: {len(GEMINI_API_KEY) if GEMINI_API_KEY else 0})")
+print(f"PINECONE_API_KEY loaded: {'✅' if PINECONE_API_KEY else '❌'} (length: {len(PINECONE_API_KEY) if PINECONE_API_KEY else 0})")
+print(f"GROQ_API_KEY loaded: {'✅' if GROQ_API_KEY else '❌'} (length: {len(GROQ_API_KEY) if GROQ_API_KEY else 0})")
+print(f"INDEX_NAME: {INDEX_NAME}")
+
+# If any are missing, show all environment variables (for debugging)
+if not GEMINI_API_KEY or not PINECONE_API_KEY or not GROQ_API_KEY:
+    print("\n⚠️ SOME ENVIRONMENT VARIABLES ARE MISSING!")
+    print("Available environment variables:")
+    for key in os.environ.keys():
+        if any(api in key.upper() for api in ['GEMINI', 'PINECONE', 'GROQ', 'INDEX']):
+            print(f"  {key}: {'***' if key not in ['INDEX_NAME'] else os.environ[key]}")
+    print("="*60)
+    # Don't exit - let the user see the error
+else:
+    print("✅ All required environment variables loaded successfully!")
+    print("="*60)
+
+# Rest of your code continues here...
 os.environ["TRULENS_OTEL_TRACING"] = "1"
 os.environ["TRULENS_OTEL_ENABLED"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "false"
@@ -26,13 +63,6 @@ from llama_index.llms.groq import Groq as LlamaGroq
 from trulens.core import TruSession, Feedback
 from trulens.core.database.sqlalchemy import SQLAlchemyDB
 from trulens.apps.app import TruApp
-
-load_dotenv()
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-INDEX_NAME = os.getenv("INDEX_NAME", "studybuddy")
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 APP_NAME = f"RAG_Eval_{RUN_ID}"
@@ -194,69 +224,100 @@ def correctness(input: str, output: str) -> float:
 def run_evaluation():
     """Run the RAG evaluation"""
     
+    print("\n" + "="*60)
+    print("🔍 RAG Evaluation with TruLens")
+    print("="*60)
+    
+    # Check if API keys are loaded before starting
+    if not GEMINI_API_KEY or not PINECONE_API_KEY or not GROQ_API_KEY:
+        print("❌ ERROR: Missing API keys!")
+        print(f"  GEMINI_API_KEY: {'✅' if GEMINI_API_KEY else '❌'}")
+        print(f"  PINECONE_API_KEY: {'✅' if PINECONE_API_KEY else '❌'}")
+        print(f"  GROQ_API_KEY: {'✅' if GROQ_API_KEY else '❌'}")
+        print("\nPlease check your environment variables on Railway.")
+        return None
+    
     print("Initializing RAG system...")
     
-    embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
-    llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
-    Settings.embed_model = embed_model
-    Settings.llm = llm
-    
-    pc = Pinecone(api_key=PINECONE_API_KEY)
-    pinecone_index = pc.Index(INDEX_NAME)
-    rag = OptimizedRAG(pinecone_index, embed_model, llm)
-    
-    class RAGWrapper:
-        def respond(self, question: str) -> str:
-            return rag.query(question)
-    
-    rag_wrapper = RAGWrapper()
-    
-    # Database connection
-    db_path = "trulens.db"
-    db = SQLAlchemyDB.from_db_url(f"sqlite:///{db_path}")
-    session = TruSession(db=db)
-    
-    # Setup feedback functions
-    f_relevance = Feedback(relevance, name="Relevance").on_input_output()
-    f_quality = Feedback(quality, name="Quality").on_input_output()
-    f_groundedness = Feedback(groundedness, name="Groundedness").on_input_output()
-    f_context_relevance = Feedback(context_relevance, name="Context Relevance").on_input_output()
-    f_correctness = Feedback(correctness, name="Correctness").on_input_output()
-    
-    tru_app = TruApp(
-        rag_wrapper,
-        app_name=APP_NAME,
-        app_version="v1.0",
-        feedbacks=[f_relevance, f_quality, f_groundedness, f_context_relevance, f_correctness],
-        main_method=rag_wrapper.respond
-    )
-    
-    # Questions to evaluate
-    questions = [
-        "Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z], what pattern does it represent and what is its limitation?",
-        "List three software applications using automata.",
-    ]
-    
-    # Run evaluation
-    print(f"\n📊 Running evaluation with {len(questions)} questions...")
-    
-    with tru_app as recording:
-        for i, q in enumerate(questions, 1):
-            print(f"  {i}/{len(questions)}: {q[:50]}...")
-            rag_wrapper.respond(q)
-    
-    print("⏳ Computing feedback scores...")
-    time.sleep(30)
-    
-    tru_app.wait_for_feedback_results()
-    records_df, feedback_names = session.get_records_and_feedback(app_name=APP_NAME)
-    
-    if records_df is not None and len(records_df) > 0:
-        print(f"✅ Evaluation complete! {len(records_df)} records saved.")
-        records_df.to_csv(f"trulens_records_{RUN_ID}.csv", index=False)
-        return session
-    else:
-        print("❌ No records found")
+    try:
+        embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
+        llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
+        Settings.embed_model = embed_model
+        Settings.llm = llm
+        
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+        pinecone_index = pc.Index(INDEX_NAME)
+        rag = OptimizedRAG(pinecone_index, embed_model, llm)
+        
+        class RAGWrapper:
+            def respond(self, question: str) -> str:
+                return rag.query(question)
+        
+        rag_wrapper = RAGWrapper()
+        
+        # Database connection
+        db_path = "trulens.db"
+        db = SQLAlchemyDB.from_db_url(f"sqlite:///{db_path}")
+        
+        # Try different session creation methods
+        try:
+            session = TruSession(db=db)
+        except:
+            try:
+                from trulens.core.database.connector import DBConnector
+                connector = DBConnector()
+                connector.db = db
+                session = TruSession(connector=connector)
+            except:
+                session = TruSession()
+                session.db = db
+        
+        # Setup feedback functions
+        f_relevance = Feedback(relevance, name="Relevance").on_input_output()
+        f_quality = Feedback(quality, name="Quality").on_input_output()
+        f_groundedness = Feedback(groundedness, name="Groundedness").on_input_output()
+        f_context_relevance = Feedback(context_relevance, name="Context Relevance").on_input_output()
+        f_correctness = Feedback(correctness, name="Correctness").on_input_output()
+        
+        tru_app = TruApp(
+            rag_wrapper,
+            app_name=APP_NAME,
+            app_version="v1.0",
+            feedbacks=[f_relevance, f_quality, f_groundedness, f_context_relevance, f_correctness],
+            main_method=rag_wrapper.respond
+        )
+        
+        # Questions to evaluate
+        questions = [
+            "Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z], what pattern does it represent and what is its limitation?",
+            "List three software applications using automata.",
+        ]
+        
+        # Run evaluation
+        print(f"\n📊 Running evaluation with {len(questions)} questions...")
+        
+        with tru_app as recording:
+            for i, q in enumerate(questions, 1):
+                print(f"  {i}/{len(questions)}: {q[:50]}...")
+                rag_wrapper.respond(q)
+        
+        print("⏳ Computing feedback scores...")
+        time.sleep(30)
+        
+        tru_app.wait_for_feedback_results()
+        records_df, feedback_names = session.get_records_and_feedback(app_name=APP_NAME)
+        
+        if records_df is not None and len(records_df) > 0:
+            print(f"✅ Evaluation complete! {len(records_df)} records saved.")
+            records_df.to_csv(f"trulens_records_{RUN_ID}.csv", index=False)
+            return session
+        else:
+            print("❌ No records found")
+            return None
+    except Exception as e:
+        print(f"❌ Error during evaluation: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # ============================================
@@ -264,10 +325,6 @@ def run_evaluation():
 # ============================================
 
 if __name__ == "__main__":
-    print("="*60)
-    print("🔍 RAG Evaluation with TruLens")
-    print("="*60)
-    
     # Run evaluation
     session = run_evaluation()
     
@@ -278,5 +335,15 @@ if __name__ == "__main__":
         print("\n🌐 Dashboard will open at: http://localhost:8501")
         print("💡 Press Ctrl+C to stop the dashboard\n")
         
-        # Launch the dashboard
-        session.run_dashboard(port=8501)
+        # Try to launch the dashboard using different methods
+        try:
+            session.run_dashboard(port=8501)
+        except Exception as e:
+            print(f"Failed to launch dashboard via session: {e}")
+            try:
+                from trulens.dashboard import run_dashboard
+                run_dashboard(port=8501)
+            except:
+                print("Could not launch dashboard. Check your TruLens installation.")
+    else:
+        print("\n❌ Evaluation failed. Check the logs above.")
