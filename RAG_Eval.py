@@ -1,4 +1,4 @@
-# RAG_Eval_API.py - Flask API with TruLens Dashboard Integration
+# RAG_Eval_API.py - Fixed with proper data storage
 import os
 import time
 import re
@@ -7,7 +7,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime
 import json
-from flask import Flask, request, jsonify, render_template_string, redirect
+from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 import threading
 import subprocess
@@ -71,153 +71,6 @@ APP_NAME = f"RAG_Eval_API_{RUN_ID}"
 rag_wrapper = None
 tru_app = None
 session = None
-trulens_dashboard_process = None
-
-# ============================================
-# TRULENS DASHBOARD LAUNCHER
-# ============================================
-
-def launch_trulens_dashboard():
-    """Launch the real TruLens dashboard in a separate thread"""
-    global trulens_dashboard_process
-    
-    try:
-        print("\n🚀 Launching TruLens Dashboard...")
-        
-        # Try different methods to launch the dashboard
-        try:
-            # Method 1: Use trulens.dashboard.run_dashboard
-            from trulens.dashboard import run_dashboard
-            print("   Method 1: Using run_dashboard()")
-            run_dashboard(session=session, port=8502)
-        except Exception as e1:
-            print(f"   Method 1 failed: {e1}")
-            
-            try:
-                # Method 2: Use subprocess
-                print("   Method 2: Using subprocess")
-                trulens_dashboard_process = subprocess.Popen(
-                    [sys.executable, "-m", "trulens.dashboard", "--port", "8502"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                print(f"   Dashboard process started (PID: {trulens_dashboard_process.pid})")
-            except Exception as e2:
-                print(f"   Method 2 failed: {e2}")
-                
-                try:
-                    # Method 3: Use session.run_dashboard
-                    print("   Method 3: Using session.run_dashboard()")
-                    session.run_dashboard(port=8502)
-                except Exception as e3:
-                    print(f"   Method 3 failed: {e3}")
-                    print("   ⚠️ Could not launch TruLens dashboard")
-                    
-    except Exception as e:
-        print(f"❌ Failed to launch TruLens dashboard: {e}")
-
-# ============================================
-# DASHBOARD HTML (Fallback if TruLens fails)
-# ============================================
-
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>RAG Evaluation Dashboard</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f7fa; }
-        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
-        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: 10px 0; }
-        .metric { display: inline-block; margin: 10px; padding: 15px 25px; background: #ecf0f1; border-radius: 8px; }
-        .metric .value { font-size: 24px; font-weight: bold; }
-        .green { color: #27ae60; }
-        .yellow { color: #f39c12; }
-        .red { color: #e74c3c; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background: #3498db; color: white; }
-        tr:hover { background: #f1f1f1; }
-        .btn { display: inline-block; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px; margin: 5px; border: none; cursor: pointer; }
-        .btn:hover { background: #2980b9; }
-        .status { padding: 15px; border-radius: 5px; margin: 10px 0; }
-        .status.info { background: #d1ecf1; color: #0c5460; }
-        .status.success { background: #d4edda; color: #155724; }
-        .trulens-link { background: #2c3e50; color: white; padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; }
-        .trulens-link a { color: #3498db; font-size: 20px; }
-    </style>
-    <script>
-        async function refreshData() {
-            document.getElementById('loading').style.display = 'block';
-            const response = await fetch('/results');
-            const data = await response.json();
-            document.getElementById('loading').style.display = 'none';
-            
-            if (data.status === 'success' && data.count > 0) {
-                document.getElementById('results').innerHTML = renderResults(data);
-            } else {
-                document.getElementById('results').innerHTML = '<div class="status info">No records found. Send some evaluations first!</div>';
-            }
-        }
-        
-        function renderResults(data) {
-            let html = `<div class="card">
-                <h3>📊 Summary</h3>
-                <div class="metric"><strong>Total Records:</strong> <span class="value">${data.count}</span></div>`;
-            
-            if (data.records.length > 0) {
-                const metrics = ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness'];
-                let avgHtml = '';
-                metrics.forEach(m => {
-                    if (data.records[0][m] !== undefined) {
-                        const avg = data.records.reduce((sum, r) => sum + (r[m] || 0), 0) / data.records.length;
-                        const color = avg >= 0.7 ? 'green' : avg >= 0.5 ? 'yellow' : 'red';
-                        avgHtml += `<div class="metric"><strong>${m}:</strong> <span class="value ${color}">${(avg * 100).toFixed(1)}%</span></div>`;
-                    }
-                });
-                html += avgHtml;
-            }
-            
-            html += `</div><div class="card">
-                <h3>📝 Records</h3>
-                <table>
-                    <tr><th>#</th><th>Question</th><th>Answer</th><th>Relevance</th><th>Quality</th><th>Groundedness</th></tr>`;
-            
-            data.records.forEach((r, i) => {
-                html += `<tr>
-                    <td>${i + 1}</td>
-                    <td>${r.input ? r.input.substring(0, 100) + '...' : 'N/A'}</td>
-                    <td>${r.output ? r.output.substring(0, 150) + '...' : 'N/A'}</td>
-                    <td style="color: ${(r.relevance || 0) >= 0.7 ? 'green' : (r.relevance || 0) >= 0.5 ? 'orange' : 'red'}">${(r.relevance || 0).toFixed(3)}</td>
-                    <td style="color: ${(r.quality || 0) >= 0.7 ? 'green' : (r.quality || 0) >= 0.5 ? 'orange' : 'red'}">${(r.quality || 0).toFixed(3)}</td>
-                    <td style="color: ${(r.groundedness || 0) >= 0.7 ? 'green' : (r.groundedness || 0) >= 0.5 ? 'orange' : 'red'}">${(r.groundedness || 0).toFixed(3)}</td>
-                </tr>`;
-            });
-            
-            html += `</table></div>
-                <a href="/results/csv" class="btn">📥 Download CSV</a>
-                <button class="btn" onclick="refreshData()">🔄 Refresh</button>`;
-            
-            return html;
-        }
-        
-        document.addEventListener('DOMContentLoaded', refreshData);
-    </script>
-</head>
-<body>
-    <h1>🔍 RAG Evaluation Dashboard</h1>
-    
-    <div class="trulens-link">
-        <h2>📊 TruLens Native Dashboard</h2>
-        <p>Access the real TruLens dashboard for advanced analytics:</p>
-        <a href="/trulens" target="_blank">🚀 Open TruLens Dashboard</a>
-    </div>
-    
-    <div id="loading" style="display: none;">Loading...</div>
-    <div id="results"></div>
-</body>
-</html>
-"""
 
 # ============================================
 # EMBEDDING
@@ -456,58 +309,15 @@ def initialize_rag():
 
 @app.route('/')
 def home():
-    """Dashboard homepage with link to TruLens dashboard"""
-    return render_template_string(DASHBOARD_HTML)
-
-@app.route('/trulens')
-def trulens_dashboard():
-    """Redirect to the real TruLens dashboard"""
-    # Try to launch TruLens dashboard if not already running
-    global trulens_dashboard_process
-    
-    if trulens_dashboard_process is None:
-        try:
-            # Try to launch it
-            from trulens.dashboard import run_dashboard
-            # Start in a thread
-            def start_dashboard():
-                try:
-                    run_dashboard(session=session, port=8502)
-                except:
-                    pass
-            
-            thread = threading.Thread(target=start_dashboard, daemon=True)
-            thread.start()
-            
-            # Wait a moment for it to start
-            time.sleep(3)
-            
-        except Exception as e:
-            print(f"Could not launch TruLens dashboard: {e}")
-            return jsonify({
-                "error": "TruLens dashboard could not be started",
-                "message": "Try running it manually: python -m trulens.dashboard --port 8502"
-            }), 500
-    
-    # Try to show the dashboard in iframe or redirect
     return render_template_string("""
     <!DOCTYPE html>
     <html>
-    <head>
-        <title>TruLens Dashboard</title>
-        <style>
-            body { margin: 0; padding: 0; height: 100vh; }
-            iframe { width: 100%; height: 100%; border: none; }
-            .info { padding: 20px; background: #f8f9fa; text-align: center; }
-        </style>
-    </head>
+    <head><title>RAG Evaluation API</title></head>
     <body>
-        <div class="info">
-            <h2>📊 TruLens Native Dashboard</h2>
-            <p>If the dashboard doesn't load, try: <code>python -m trulens.dashboard --port 8502</code></p>
-            <p><a href="/" style="color: #3498db;">Back to simple dashboard</a></p>
-        </div>
-        <iframe src="http://localhost:8502"></iframe>
+        <h1>RAG Evaluation API</h1>
+        <p>Status: Running</p>
+        <p><a href="/results">View Results</a></p>
+        <p><a href="/health">Health Check</a></p>
     </body>
     </html>
     """)
@@ -519,22 +329,15 @@ def health():
         "timestamp": datetime.now().isoformat()
     })
 
+# ============================================
+# FIXED EVALUATE ENDPOINT - PROPERLY SAVES DATA
+# ============================================
+
 @app.route('/evaluate', methods=['POST'])
 def evaluate():
     try:
-        raw_data = request.get_data(as_text=True)
-        print(f"📥 Raw data received: {raw_data[:200]}...")
-        
-        try:
-            data = json.loads(raw_data)
-        except:
-            data = request.get_json()
-        
-        if isinstance(data, str):
-            try:
-                data = json.loads(data)
-            except:
-                return jsonify({"error": "Invalid JSON format", "status": "error"}), 400
+        # Get JSON data
+        data = request.get_json()
         
         if not data or 'question' not in data:
             return jsonify({
@@ -543,7 +346,7 @@ def evaluate():
             }), 400
         
         question = data['question']
-        answer = data.get('answer', '')
+        answer = data.get('answer', 'No answer provided')
         contexts = data.get('contexts', [])
         user_id = data.get('user_id', 'default')
         
@@ -551,33 +354,33 @@ def evaluate():
         print(f"   Answer length: {len(answer)} chars")
         print(f"   Contexts: {len(contexts)} passages")
         
+        # ============================================
+        # FIX: Direct database insert using Record
+        # ============================================
+        
+        from trulens.core.record import Record
+        
+        # Create a proper TruLens record
+        record = Record(
+            app_id=APP_NAME,
+            main_input=question,
+            main_output=answer,
+            meta={
+                "contexts": contexts,
+                "user_id": user_id,
+                "context_count": len(contexts),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+        # Insert into database
         try:
-            if tru_app is not None and rag_wrapper is not None:
-                with tru_app as recording:
-                    rag_wrapper.respond_with_context(question, contexts)
-                print("   ✅ Recorded via tru_app")
-            else:
-                print("   ⚠️ tru_app not available, using direct insert")
-                
-                from trulens.core.record import Record
-                
-                record = Record(
-                    app_id=APP_NAME,
-                    main_input=question,
-                    main_output=answer,
-                    meta={
-                        "contexts": contexts,
-                        "user_id": user_id,
-                        "context_count": len(contexts)
-                    }
-                )
-                
-                session.records.insert(record)
-                session.connector.db.commit()
-                print("   ✅ Record inserted directly")
-                
-        except Exception as db_error:
-            print(f"   ⚠️ Recording error: {db_error}")
+            session.records.insert(record)
+            session.connector.db.commit()
+            print("   ✅ Record saved to database!")
+        except Exception as e:
+            print(f"   ⚠️ Insert error: {e}")
+            # Try alternative method
             try:
                 db = session.connector.db
                 from trulens.core.database.orm import Record as ORMRecord
@@ -593,7 +396,7 @@ def evaluate():
                 )
                 db.add(new_record)
                 db.commit()
-                print("   ✅ Record inserted via ORM fallback")
+                print("   ✅ Record saved via ORM fallback!")
             except Exception as e2:
                 print(f"   ❌ All insert methods failed: {e2}")
                 return jsonify({
@@ -601,8 +404,10 @@ def evaluate():
                     "status": "error"
                 }), 500
         
-        time.sleep(3)
+        # Wait for feedback computation
+        time.sleep(2)
         
+        # Verify
         try:
             records_df, _ = session.get_records_and_feedback(app_name=APP_NAME)
             count = len(records_df) if records_df is not None else 0
@@ -642,6 +447,8 @@ def evaluate_batch():
         questions = data['questions']
         results = []
         
+        from trulens.core.record import Record
+        
         for q_data in questions:
             question = q_data['question']
             contexts = q_data.get('contexts', [])
@@ -660,19 +467,18 @@ def evaluate_batch():
                     temp_rag = OptimizedRAG(pinecone_index, embed_model, llm)
                     answer, contexts = temp_rag.query(question)
             
-            try:
-                with tru_app as recording:
-                    rag_wrapper.respond_with_context(question, contexts)
-            except:
-                from trulens.core.record import Record
-                record = Record(
-                    app_id=APP_NAME,
-                    main_input=question,
-                    main_output=answer,
-                    meta={"contexts": contexts}
-                )
-                session.records.insert(record)
-                session.connector.db.commit()
+            # Save each record directly
+            record = Record(
+                app_id=APP_NAME,
+                main_input=question,
+                main_output=answer,
+                meta={
+                    "contexts": contexts,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+            session.records.insert(record)
+            session.connector.db.commit()
             
             results.append({
                 "question": question,
@@ -758,22 +564,14 @@ if __name__ == "__main__":
         print("🚀 Starting Flask API Server...")
         print("="*60)
         print("\n📌 Available Endpoints:")
-        print("  GET  /                 - Dashboard (HTML)")
-        print("  GET  /trulens          - TruLens Native Dashboard")
+        print("  GET  /                 - Home")
         print("  GET  /health           - Health check")
         print("  POST /evaluate         - Evaluate single question")
         print("  POST /evaluate_batch   - Evaluate multiple questions")
         print("  GET  /results          - Get all results")
         print("  GET  /results/csv      - Download results as CSV")
-        print("\n🌐 Dashboard: https://rag-eval-for-study-buddy-production.up.railway.app")
-        print("🌐 TruLens: https://rag-eval-for-study-buddy-production.up.railway.app/trulens")
+        print("\n🌐 API: https://rag-eval-for-study-buddy-production.up.railway.app")
         print("="*60)
-        
-        # Try to launch TruLens dashboard in background
-        try:
-            launch_trulens_dashboard()
-        except:
-            pass
         
         app.run(host='0.0.0.0', port=8501, debug=False)
     else:
