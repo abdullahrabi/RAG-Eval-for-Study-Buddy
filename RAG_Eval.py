@@ -1,4 +1,4 @@
-# RAG_Eval.py - Fixed version
+# RAG_Eval.py - Simple version using Streamlit's built-in port forwarding
 import os
 import time
 import re
@@ -7,6 +7,9 @@ import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime
 import streamlit as st
+import subprocess
+import threading
+import socket
 
 warnings.filterwarnings('ignore')
 
@@ -188,13 +191,49 @@ def correctness(input: str, output: str) -> float:
     return get_router().call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
 
 # ============================================
-# STREAMLIT UI
+# DASHBOARD LAUNCHER - SIMPLE VERSION
 # ============================================
 
-st.set_page_config(page_title="RAG Evaluation with TruLens", layout="wide")
+def find_free_port():
+    """Find a free port to run the dashboard"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        return s.getsockname()[1]
+
+def launch_dashboard():
+    """Launch TruLens dashboard on a free port"""
+    try:
+        # Find a free port
+        port = find_free_port()
+        st.info(f"Starting TruLens dashboard on port {port}...")
+        
+        # Start dashboard in background
+        process = subprocess.Popen(
+            ["trulens", "dashboard", "--port", str(port), "--no-browser"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Wait for it to start
+        time.sleep(5)
+        
+        # Get the local URL
+        local_url = f"http://localhost:{port}"
+        
+        # Store in session state
+        st.session_state['dashboard_process'] = process
+        st.session_state['dashboard_port'] = port
+        st.session_state['dashboard_url'] = local_url
+        st.session_state['dashboard_launched'] = True
+        
+        return local_url
+    except Exception as e:
+        st.error(f"Failed to launch dashboard: {e}")
+        return None
 
 def run_evaluation():
-    """Run the RAG evaluation and store results"""
+    """Run the RAG evaluation"""
     
     with st.spinner("Initializing RAG system..."):
         embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
@@ -212,16 +251,14 @@ def run_evaluation():
         
         rag_wrapper = RAGWrapper()
     
-    # Use persistent database - FIXED CONNECTION
+    # Use persistent database
     db_path = "trulens.db"
     db = SQLAlchemyDB.from_db_url(f"sqlite:///{db_path}")
     
-    # Create connector differently for newer versions
+    # Handle different API versions
     try:
-        # Try new API
         connector = DefaultDBConnector(db)
     except TypeError:
-        # Fallback to old API
         connector = DefaultDBConnector(db=db)
     
     session = TruSession(connector=connector)
@@ -258,20 +295,18 @@ def run_evaluation():
             progress_bar.progress(i / len(questions))
     
     status_text.text("Computing feedback scores...")
-    time.sleep(30)  # Allow time for feedback computation
+    time.sleep(30)
     
     try:
         tru_app.wait_for_feedback_results()
         records_df, feedback_names = session.get_records_and_feedback(app_name=APP_NAME)
         
         if records_df is not None and len(records_df) > 0:
-            # Store in session state
             st.session_state['records_df'] = records_df
             st.session_state['feedback_names'] = feedback_names
             st.session_state['app_name'] = APP_NAME
             st.session_state['evaluation_done'] = True
             
-            # Save to CSV
             records_df.to_csv(f"trulens_records_{RUN_ID}.csv", index=False)
             
             status_text.text("✅ Evaluation complete!")
@@ -284,138 +319,30 @@ def run_evaluation():
         st.error(f"Error during evaluation: {str(e)[:200]}")
         return False
 
-def show_dashboard():
-    """Display the TruLens dashboard"""
-    
-    if 'records_df' not in st.session_state:
-        st.warning("No evaluation data found. Please run the evaluation first.")
-        return
-    
-    records_df = st.session_state['records_df']
-    
-    st.header("📊 TruLens Evaluation Dashboard")
-    
-    # Summary metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    metric_cols = ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness']
-    available_metrics = [col for col in metric_cols if col in records_df.columns]
-    
-    with col1:
-        st.metric("Total Records", len(records_df))
-    
-    if available_metrics:
-        with col2:
-            avg_score = records_df[available_metrics].mean().mean()
-            st.metric("Average Score", f"{avg_score:.3f}")
-        
-        with col3:
-            min_score = records_df[available_metrics].min().min()
-            st.metric("Min Score", f"{min_score:.3f}")
-        
-        with col4:
-            max_score = records_df[available_metrics].max().max()
-            st.metric("Max Score", f"{max_score:.3f}")
-    
-    # Metrics visualization
-    st.subheader("📈 Performance Metrics")
-    
-    if available_metrics:
-        # Create columns for metrics
-        cols = st.columns(len(available_metrics))
-        
-        for idx, metric in enumerate(available_metrics):
-            with cols[idx]:
-                mean_val = records_df[metric].mean()
-                median_val = records_df[metric].median()
-                std_val = records_df[metric].std()
-                
-                # Color coding
-                color = "🟢" if mean_val >= 0.7 else "🟡" if mean_val >= 0.5 else "🔴"
-                
-                st.metric(
-                    f"{color} {metric}",
-                    f"{mean_val:.3f}",
-                    delta=f"±{std_val:.3f}",
-                    delta_color="off"
-                )
-                st.caption(f"Median: {median_val:.3f}")
-    
-    # Show distribution
-    if available_metrics:
-        st.subheader("📊 Score Distribution")
-        
-        # Create a dataframe for visualization
-        chart_data = pd.DataFrame()
-        for metric in available_metrics:
-            chart_data[metric] = records_df[metric]
-        
-        st.dataframe(chart_data.describe(), use_container_width=True)
-        
-        # Show individual records
-        st.subheader("📝 Detailed Records")
-        
-        # Create expandable table
-        with st.expander("View all records"):
-            display_cols = ['input', 'output'] + available_metrics
-            available_display_cols = [col for col in display_cols if col in records_df.columns]
-            
-            if available_display_cols:
-                # Truncate long text
-                display_df = records_df[available_display_cols].copy()
-                for col in ['input', 'output']:
-                    if col in display_df.columns:
-                        display_df[col] = display_df[col].str[:200] + "..."
-                
-                st.dataframe(display_df, use_container_width=True, height=300)
-        
-        # Export option
-        col1, col2 = st.columns(2)
-        with col1:
-            csv = records_df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv,
-                file_name=f"trulens_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        
-        with col2:
-            if st.button("🔄 Run New Evaluation", use_container_width=True):
-                st.session_state['evaluation_done'] = False
-                st.rerun()
-    
-    # Show app info
-    if 'app_name' in st.session_state:
-        st.sidebar.success(f"📱 App: {st.session_state['app_name']}")
-    
-    if 'feedback_names' in st.session_state and st.session_state['feedback_names']:
-        st.sidebar.subheader("📋 Feedback Functions")
-        for fb in st.session_state['feedback_names']:
-            st.sidebar.write(f"✅ {fb}")
+# ============================================
+# STREAMLIT UI
+# ============================================
 
-# ============================================
-# MAIN STREAMLIT APP
-# ============================================
+st.set_page_config(page_title="RAG Evaluation with TruLens", layout="wide")
 
 def main():
     st.title("🔍 RAG Evaluation with TruLens")
     
-    # Sidebar
     st.sidebar.header("⚙️ Configuration")
     st.sidebar.info(f"Index: {INDEX_NAME}")
     st.sidebar.info(f"Run ID: {RUN_ID}")
     
-    # Check if evaluation has been run
+    # Initialize session state
     if 'evaluation_done' not in st.session_state:
         st.session_state['evaluation_done'] = False
     
-    # Show buttons based on state
+    if 'dashboard_launched' not in st.session_state:
+        st.session_state['dashboard_launched'] = False
+    
+    # Show evaluation button
     if not st.session_state['evaluation_done']:
         st.info("Click the button below to start the RAG evaluation.")
         
-        # Questions preview
         with st.expander("📝 Evaluation Questions"):
             questions = [
                 "Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z], what pattern does it represent and what is its limitation?",
@@ -429,10 +356,69 @@ def main():
             if success:
                 st.rerun()
     else:
-        # Show the dashboard
-        show_dashboard()
+        st.success("✅ Evaluation completed!")
+        
+        # Show TruLens Dashboard button
+        if not st.session_state['dashboard_launched']:
+            if st.button("📊 Open TruLens Dashboard", type="primary", use_container_width=True):
+                url = launch_dashboard()
+                if url:
+                    st.session_state['dashboard_launched'] = True
+                    st.rerun()
+        else:
+            # Show dashboard URL - THIS WILL WORK WITH STREAMLIT CLOUD
+            if 'dashboard_url' in st.session_state:
+                st.markdown(f"""
+                ### ✅ TruLens Dashboard is running!
+                
+                The dashboard is available at:
+                
+                🔗 **`{st.session_state['dashboard_url']}`**
+                
+                💡 **Note:** Since this is running on Streamlit Cloud, the URL above will be automatically forwarded. 
+                Click the link or open it in a new tab.
+                """)
+                
+                # Create a clickable link
+                st.markdown(f"""
+                [**Click here to open TruLens Dashboard**]({st.session_state['dashboard_url']})
+                """)
+                
+                st.info("📌 The dashboard will remain active until you close this session.")
+            
+            # Show option to restart dashboard
+            if st.button("🔄 Restart Dashboard"):
+                st.session_state['dashboard_launched'] = False
+                if 'dashboard_process' in st.session_state:
+                    try:
+                        st.session_state['dashboard_process'].terminate()
+                    except:
+                        pass
+                st.rerun()
+        
+        # Show summary of results
+        if 'records_df' in st.session_state:
+            records_df = st.session_state['records_df']
+            st.subheader("📊 Evaluation Summary")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            metric_cols = ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness']
+            available_metrics = [col for col in metric_cols if col in records_df.columns]
+            
+            with col1:
+                st.metric("Total Questions", len(records_df))
+            
+            if available_metrics:
+                avg_score = records_df[available_metrics].mean().mean()
+                with col2:
+                    st.metric("Average Score", f"{avg_score:.3f}")
+                
+                # Show individual metrics
+                st.subheader("📈 Individual Metrics")
+                metric_df = records_df[available_metrics].mean().reset_index()
+                metric_df.columns = ['Metric', 'Score']
+                st.dataframe(metric_df, use_container_width=True)
     
-    # Footer
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Built with TruLens • {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
