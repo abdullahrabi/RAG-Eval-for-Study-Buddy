@@ -1,4 +1,4 @@
-# RAG_Eval_API.py - Fixed with proper data storage
+# RAG_Eval.py - Final Working Version
 import os
 import time
 import re
@@ -6,12 +6,8 @@ import warnings
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime
-import json
-from flask import Flask, request, jsonify, render_template_string
-from flask_cors import CORS
-import threading
-import subprocess
 import sys
+import subprocess
 
 warnings.filterwarnings('ignore')
 
@@ -30,9 +26,9 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or os.environ.get("PINECONE_API
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME") or os.environ.get("INDEX_NAME", "studybuddy")
 
-print(f"GEMINI_API_KEY loaded: {'✅' if GEMINI_API_KEY else '❌'}")
-print(f"PINECONE_API_KEY loaded: {'✅' if PINECONE_API_KEY else '❌'}")
-print(f"GROQ_API_KEY loaded: {'✅' if GROQ_API_KEY else '❌'}")
+print(f"GEMINI_API_KEY loaded: {'✅' if GEMINI_API_KEY else '❌'} (length: {len(GEMINI_API_KEY) if GEMINI_API_KEY else 0})")
+print(f"PINECONE_API_KEY loaded: {'✅' if PINECONE_API_KEY else '❌'} (length: {len(PINECONE_API_KEY) if PINECONE_API_KEY else 0})")
+print(f"GROQ_API_KEY loaded: {'✅' if GROQ_API_KEY else '❌'} (length: {len(GROQ_API_KEY) if GROQ_API_KEY else 0})")
 print(f"INDEX_NAME: {INDEX_NAME}")
 
 if not GEMINI_API_KEY or not PINECONE_API_KEY or not GROQ_API_KEY:
@@ -53,24 +49,12 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports
+# TruLens imports - CORRECT WAY
 from trulens.core import TruSession, Feedback
 from trulens.apps.app import TruApp
 
-# ============================================
-# FLASK APP
-# ============================================
-
-app = Flask(__name__)
-CORS(app)
-
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
-APP_NAME = f"RAG_Eval_API_{RUN_ID}"
-
-# Global variables
-rag_wrapper = None
-tru_app = None
-session = None
+APP_NAME = f"RAG_Eval_{RUN_ID}"
 
 # ============================================
 # EMBEDDING
@@ -136,11 +120,11 @@ class OptimizedRAG:
         self.embed_model = embed_model
         self.llm = llm
     
-    def query(self, question: str) -> tuple:
+    def query(self, question: str) -> str:
         try:
             query_embedding = self.embed_model._embed_text(question)
             if not query_embedding:
-                return "No relevant documents found.", []
+                return "No relevant documents found."
             
             results = self.pinecone_index.query(vector=query_embedding, top_k=5, include_metadata=True)
             
@@ -150,27 +134,7 @@ class OptimizedRAG:
                     contexts.append(match.metadata['text'][:800])
             
             if not contexts:
-                return "No relevant documents found.", []
-            
-            prompt = f"""Answer based on context.
-
-CONTEXT:
-{chr(10).join(contexts)}
-
-QUESTION:
-{question}
-
-ANSWER:"""
-            
-            response = self.llm.complete(prompt)
-            return str(response).strip(), contexts
-        except Exception as e:
-            return f"Error: {e}", []
-    
-    def query_with_context(self, question: str, contexts: list) -> str:
-        try:
-            if not contexts:
-                return "No context provided."
+                return "No relevant documents found."
             
             prompt = f"""Answer based on context.
 
@@ -243,19 +207,26 @@ def correctness(input: str, output: str) -> float:
     return get_router().call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
 
 # ============================================
-# INITIALIZE RAG SYSTEM
+# EVALUATION
 # ============================================
 
-def initialize_rag():
-    global rag_wrapper, tru_app, session
+def run_evaluation():
+    """Run the RAG evaluation"""
     
     print("\n" + "="*60)
-    print("🔍 Initializing RAG System...")
+    print("🔍 RAG Evaluation with TruLens")
     print("="*60)
     
+    # Check if API keys are loaded before starting
     if not GEMINI_API_KEY or not PINECONE_API_KEY or not GROQ_API_KEY:
         print("❌ ERROR: Missing API keys!")
-        return False
+        print(f"  GEMINI_API_KEY: {'✅' if GEMINI_API_KEY else '❌'}")
+        print(f"  PINECONE_API_KEY: {'✅' if PINECONE_API_KEY else '❌'}")
+        print(f"  GROQ_API_KEY: {'✅' if GROQ_API_KEY else '❌'}")
+        print("\nPlease check your environment variables on Railway.")
+        return None
+    
+    print("Initializing RAG system...")
     
     try:
         embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
@@ -269,17 +240,18 @@ def initialize_rag():
         
         class RAGWrapper:
             def respond(self, question: str) -> str:
-                answer, _ = rag.query(question)
-                return answer
-            
-            def respond_with_context(self, question: str, contexts: list) -> str:
-                return rag.query_with_context(question, contexts)
+                return rag.query(question)
         
         rag_wrapper = RAGWrapper()
         
+        # ============================================
+        # DATABASE CONNECTION - CORRECT WAY
+        # ============================================
+        # Using the officially recommended method to connect to a SQLite database
         session = TruSession(database_url="sqlite:///trulens.db")
         print("✅ Database connection established.")
         
+        # Setup feedback functions
         f_relevance = Feedback(relevance, name="Relevance").on_input_output()
         f_quality = Feedback(quality, name="Quality").on_input_output()
         f_groundedness = Feedback(groundedness, name="Groundedness").on_input_output()
@@ -294,286 +266,86 @@ def initialize_rag():
             main_method=rag_wrapper.respond
         )
         
-        print("✅ RAG system initialized successfully!")
-        print("="*60)
-        return True
-    except Exception as e:
-        print(f"❌ Error initializing RAG: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-# ============================================
-# API ENDPOINTS
-# ============================================
-
-@app.route('/')
-def home():
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head><title>RAG Evaluation API</title></head>
-    <body>
-        <h1>RAG Evaluation API</h1>
-        <p>Status: Running</p>
-        <p><a href="/results">View Results</a></p>
-        <p><a href="/health">Health Check</a></p>
-    </body>
-    </html>
-    """)
-
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat()
-    })
-
-# ============================================
-# FIXED EVALUATE ENDPOINT - PROPERLY SAVES DATA
-# ============================================
-
-@app.route('/evaluate', methods=['POST'])
-def evaluate():
-    try:
-        # Get JSON data
-        data = request.get_json()
+        # Questions to evaluate
+        questions = [
+            "Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z], what pattern does it represent and what is its limitation?",
+            "List three software applications using automata.",
+        ]
         
-        if not data or 'question' not in data:
-            return jsonify({
-                "error": "Missing 'question' in request body",
-                "status": "error"
-            }), 400
+        # Run evaluation
+        print(f"\n📊 Running evaluation with {len(questions)} questions...")
         
-        question = data['question']
-        answer = data.get('answer', 'No answer provided')
-        contexts = data.get('contexts', [])
-        user_id = data.get('user_id', 'default')
+        with tru_app as recording:
+            for i, q in enumerate(questions, 1):
+                print(f"  {i}/{len(questions)}: {q[:50]}...")
+                rag_wrapper.respond(q)
         
-        print(f"\n📝 Evaluating: {question[:50]}...")
-        print(f"   Answer length: {len(answer)} chars")
-        print(f"   Contexts: {len(contexts)} passages")
+        print("⏳ Computing feedback scores...")
+        time.sleep(30)
         
-        # ============================================
-        # FIX: Direct database insert using Record
-        # ============================================
-        
-        from trulens.core.record import Record
-        
-        # Create a proper TruLens record
-        record = Record(
-            app_id=APP_NAME,
-            main_input=question,
-            main_output=answer,
-            meta={
-                "contexts": contexts,
-                "user_id": user_id,
-                "context_count": len(contexts),
-                "timestamp": datetime.now().isoformat()
-            }
-        )
-        
-        # Insert into database
-        try:
-            session.records.insert(record)
-            session.connector.db.commit()
-            print("   ✅ Record saved to database!")
-        except Exception as e:
-            print(f"   ⚠️ Insert error: {e}")
-            # Try alternative method
-            try:
-                db = session.connector.db
-                from trulens.core.database.orm import Record as ORMRecord
-                
-                new_record = ORMRecord(
-                    app_id=APP_NAME,
-                    main_input=question,
-                    main_output=answer,
-                    meta=json.dumps({
-                        "contexts": contexts,
-                        "user_id": user_id
-                    })
-                )
-                db.add(new_record)
-                db.commit()
-                print("   ✅ Record saved via ORM fallback!")
-            except Exception as e2:
-                print(f"   ❌ All insert methods failed: {e2}")
-                return jsonify({
-                    "error": f"Database insert failed: {str(e2)}",
-                    "status": "error"
-                }), 500
-        
-        # Wait for feedback computation
-        time.sleep(2)
-        
-        # Verify
-        try:
-            records_df, _ = session.get_records_and_feedback(app_name=APP_NAME)
-            count = len(records_df) if records_df is not None else 0
-            print(f"   📊 Database now has {count} records")
-        except:
-            pass
-        
-        return jsonify({
-            "status": "success",
-            "question": question,
-            "answer": answer[:200] + "..." if len(answer) > 200 else answer,
-            "contexts_count": len(contexts),
-            "user_id": user_id,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in evaluate: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            "error": str(e),
-            "status": "error"
-        }), 500
-
-@app.route('/evaluate_batch', methods=['POST'])
-def evaluate_batch():
-    try:
-        data = request.get_json()
-        
-        if not data or 'questions' not in data:
-            return jsonify({
-                "error": "Missing 'questions' in request body",
-                "status": "error"
-            }), 400
-        
-        questions = data['questions']
-        results = []
-        
-        from trulens.core.record import Record
-        
-        for q_data in questions:
-            question = q_data['question']
-            contexts = q_data.get('contexts', [])
-            provided_answer = q_data.get('answer', None)
-            
-            if provided_answer:
-                answer = provided_answer
-            else:
-                if contexts:
-                    answer = rag_wrapper.respond_with_context(question, contexts)
-                else:
-                    embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
-                    llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
-                    pc = Pinecone(api_key=PINECONE_API_KEY)
-                    pinecone_index = pc.Index(INDEX_NAME)
-                    temp_rag = OptimizedRAG(pinecone_index, embed_model, llm)
-                    answer, contexts = temp_rag.query(question)
-            
-            # Save each record directly
-            record = Record(
-                app_id=APP_NAME,
-                main_input=question,
-                main_output=answer,
-                meta={
-                    "contexts": contexts,
-                    "timestamp": datetime.now().isoformat()
-                }
-            )
-            session.records.insert(record)
-            session.connector.db.commit()
-            
-            results.append({
-                "question": question,
-                "answer": answer,
-                "contexts": contexts
-            })
-        
-        time.sleep(5)
-        
-        return jsonify({
-            "status": "success",
-            "total": len(results),
-            "results": results,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in batch evaluate: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            "error": str(e),
-            "status": "error"
-        }), 500
-
-@app.route('/results', methods=['GET'])
-def get_results():
-    try:
+        tru_app.wait_for_feedback_results()
         records_df, feedback_names = session.get_records_and_feedback(app_name=APP_NAME)
         
         if records_df is not None and len(records_df) > 0:
-            records = records_df.to_dict(orient='records')
-            return jsonify({
-                "status": "success",
-                "count": len(records),
-                "records": records,
-                "feedback_names": feedback_names
-            })
+            print(f"✅ Evaluation complete! {len(records_df)} records saved.")
+            records_df.to_csv(f"trulens_records_{RUN_ID}.csv", index=False)
+            return session
         else:
-            return jsonify({
-                "status": "success",
-                "count": 0,
-                "records": [],
-                "message": "No records found"
-            })
+            print("❌ No records found")
+            return None
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "status": "error"
-        }), 500
-
-@app.route('/results/csv', methods=['GET'])
-def get_results_csv():
-    try:
-        records_df, feedback_names = session.get_records_and_feedback(app_name=APP_NAME)
-        
-        if records_df is not None and len(records_df) > 0:
-            csv = records_df.to_csv(index=False)
-            return jsonify({
-                "status": "success",
-                "csv": csv,
-                "filename": f"trulens_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            })
-        else:
-            return jsonify({
-                "status": "success",
-                "csv": None,
-                "message": "No records found"
-            })
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "status": "error"
-        }), 500
+        print(f"❌ Error during evaluation: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # ============================================
-# MAIN
+# MAIN - RUN EVALUATION THEN DASHBOARD
 # ============================================
 
 if __name__ == "__main__":
-    if initialize_rag():
+    # Run evaluation
+    session = run_evaluation()
+    
+    if session:
         print("\n" + "="*60)
-        print("🚀 Starting Flask API Server...")
-        print("="*60)
-        print("\n📌 Available Endpoints:")
-        print("  GET  /                 - Home")
-        print("  GET  /health           - Health check")
-        print("  POST /evaluate         - Evaluate single question")
-        print("  POST /evaluate_batch   - Evaluate multiple questions")
-        print("  GET  /results          - Get all results")
-        print("  GET  /results/csv      - Download results as CSV")
-        print("\n🌐 API: https://rag-eval-for-study-buddy-production.up.railway.app")
+        print("📊 Launching TruLens Dashboard...")
         print("="*60)
         
-        app.run(host='0.0.0.0', port=8501, debug=False)
+        # The correct way to launch the dashboard
+        try:
+            # Import the dashboard runner
+            from trulens.dashboard import run_dashboard
+            
+            # Run the dashboard - this will bind to all interfaces
+            print("Starting dashboard on port 8501...")
+            run_dashboard(session=session, port=8501)
+            
+        except Exception as e:
+            print(f"Dashboard error: {e}")
+            print("Trying alternative method...")
+            
+            # Alternative: Use streamlit directly
+            try:
+                import streamlit.web.cli as stcli
+                import sys
+                
+                # Find the dashboard module path
+                import trulens.dashboard as dashboard_module
+                dashboard_path = os.path.dirname(dashboard_module.__file__)
+                dashboard_file = os.path.join(dashboard_path, 'app.py')
+                
+                if os.path.exists(dashboard_file):
+                    sys.argv = [
+                        "streamlit", "run", dashboard_file,
+                        "--server.port", "8501",
+                        "--server.address", "0.0.0.0",
+                        "--server.headless", "true"
+                    ]
+                    stcli.main()
+            except Exception as e2:
+                print(f"Alternative also failed: {e2}")
+                print("\n💡 Dashboard could not be started automatically.")
+                print("But you can still access your results via the CSV file.")
     else:
-        print("\n❌ Failed to initialize RAG system.")
-        print("Please check your environment variables.")
+        print("\n❌ Evaluation failed. Check the logs above.")
