@@ -1,4 +1,4 @@
-# RAG_Eval.py - Simple version using Streamlit's built-in port forwarding
+# RAG_Eval.py - Fixed with Python API for dashboard
 import os
 import time
 import re
@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 from datetime import datetime
 import streamlit as st
 import subprocess
-import threading
 import socket
+import sys
 
 warnings.filterwarnings('ignore')
 
@@ -26,7 +26,7 @@ from llama_index.llms.groq import Groq as LlamaGroq
 
 # TruLens imports
 from trulens.core import TruSession, Feedback
-from trulens.core.database.connector.default import DefaultDBConnector
+from trulens.core.database import default
 from trulens.core.database.sqlalchemy import SQLAlchemyDB
 from trulens.apps.app import TruApp
 
@@ -191,45 +191,95 @@ def correctness(input: str, output: str) -> float:
     return get_router().call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
 
 # ============================================
-# DASHBOARD LAUNCHER - SIMPLE VERSION
+# DASHBOARD LAUNCHER - USING PYTHON API
 # ============================================
 
-def find_free_port():
-    """Find a free port to run the dashboard"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
-        return s.getsockname()[1]
-
 def launch_dashboard():
-    """Launch TruLens dashboard on a free port"""
+    """Launch TruLens dashboard using Python API"""
     try:
-        # Find a free port
-        port = find_free_port()
-        st.info(f"Starting TruLens dashboard on port {port}...")
+        st.info("🚀 Starting TruLens dashboard...")
         
-        # Start dashboard in background
-        process = subprocess.Popen(
-            ["trulens", "dashboard", "--port", str(port), "--no-browser"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        # Try to import and use trulens dashboard directly
+        try:
+            from trulens.dashboard import run_dashboard
+            import threading
+            
+            # Start dashboard in a separate thread
+            def start_dashboard():
+                try:
+                    run_dashboard(port=8503, host="0.0.0.0", open_browser=False)
+                except Exception as e:
+                    print(f"Dashboard error: {e}")
+            
+            thread = threading.Thread(target=start_dashboard, daemon=True)
+            thread.start()
+            
+            time.sleep(3)
+            dashboard_url = "http://localhost:8503"
+            
+            st.session_state['dashboard_url'] = dashboard_url
+            st.session_state['dashboard_launched'] = True
+            st.session_state['dashboard_thread'] = thread
+            
+            return dashboard_url
+            
+        except ImportError:
+            st.warning("trulens.dashboard not available, trying alternative...")
         
-        # Wait for it to start
-        time.sleep(5)
+        # Alternative: Use Python's built-in HTTP server to serve the dashboard
+        try:
+            from trulens.core.dashboard import Dashboard
+            from trulens.core import TruSession
+            
+            # Create dashboard instance
+            db_path = "trulens.db"
+            db = SQLAlchemyDB.from_db_url(f"sqlite:///{db_path}")
+            
+            # Handle different connector types
+            try:
+                connector = default.DefaultDBConnector()
+                connector.db = db
+            except:
+                try:
+                    from trulens.core.database.connector import DBConnector
+                    connector = DBConnector(db=db)
+                except:
+                    connector = None
+            
+            if connector:
+                session = TruSession(connector=connector)
+                dashboard = Dashboard(session=session)
+                
+                # Start dashboard
+                import threading
+                def run_dash():
+                    dashboard.run(port=8503, host="0.0.0.0")
+                
+                thread = threading.Thread(target=run_dash, daemon=True)
+                thread.start()
+                
+                time.sleep(3)
+                dashboard_url = "http://localhost:8503"
+                
+                st.session_state['dashboard_url'] = dashboard_url
+                st.session_state['dashboard_launched'] = True
+                st.session_state['dashboard_thread'] = thread
+                
+                return dashboard_url
+                
+        except Exception as e:
+            st.warning(f"Alternative dashboard failed: {e}")
         
-        # Get the local URL
-        local_url = f"http://localhost:{port}"
+        # Final alternative: Use streamlit's built-in dashboard
+        st.info("Using Streamlit's built-in dashboard view...")
         
-        # Store in session state
-        st.session_state['dashboard_process'] = process
-        st.session_state['dashboard_port'] = port
-        st.session_state['dashboard_url'] = local_url
+        # Create a simple dashboard view using Streamlit
+        st.session_state['use_simple_dashboard'] = True
         st.session_state['dashboard_launched'] = True
+        return "simple"
         
-        return local_url
     except Exception as e:
-        st.error(f"Failed to launch dashboard: {e}")
+        st.error(f"Failed to launch dashboard: {str(e)}")
         return None
 
 def run_evaluation():
@@ -253,14 +303,22 @@ def run_evaluation():
     
     # Use persistent database
     db_path = "trulens.db"
+    
+    # Create SQLAlchemy DB
     db = SQLAlchemyDB.from_db_url(f"sqlite:///{db_path}")
     
-    # Handle different API versions
+    # FIX: Use the correct way to create connector
     try:
-        connector = DefaultDBConnector(db)
-    except TypeError:
-        connector = DefaultDBConnector(db=db)
+        from trulens.core.database.connector import DBConnector
+        connector = DBConnector(db=db)
+    except (ImportError, TypeError):
+        try:
+            connector = default.DefaultDBConnector(db=db)
+        except TypeError:
+            connector = default.DefaultDBConnector()
+            connector.db = db
     
+    # Create session
     session = TruSession(connector=connector)
     
     # Setup feedback functions
@@ -317,7 +375,62 @@ def run_evaluation():
             return False
     except Exception as e:
         st.error(f"Error during evaluation: {str(e)[:200]}")
+        import traceback
+        st.error(traceback.format_exc())
         return False
+
+def show_simple_dashboard():
+    """Show a simple dashboard using Streamlit"""
+    st.subheader("📊 Evaluation Results")
+    
+    if 'records_df' in st.session_state:
+        records_df = st.session_state['records_df']
+        
+        # Metrics summary
+        col1, col2, col3 = st.columns(3)
+        metric_cols = ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness']
+        available_metrics = [col for col in metric_cols if col in records_df.columns]
+        
+        with col1:
+            st.metric("Total Questions", len(records_df))
+        
+        if available_metrics:
+            avg_score = records_df[available_metrics].mean().mean()
+            with col2:
+                st.metric("Average Score", f"{avg_score:.3f}")
+            
+            with col3:
+                best_metric = records_df[available_metrics].mean().idxmax()
+                best_score = records_df[available_metrics].mean().max()
+                st.metric("Best Performing", f"{best_metric}: {best_score:.3f}")
+            
+            # Individual metrics
+            st.subheader("📈 Individual Metrics")
+            metric_df = records_df[available_metrics].mean().reset_index()
+            metric_df.columns = ['Metric', 'Score']
+            
+            # Color code
+            def color_score(val):
+                color = '#4CAF50' if val >= 0.7 else '#FF9800' if val >= 0.5 else '#f44336'
+                return f'background-color: {color}; color: white; padding: 5px; border-radius: 5px;'
+            
+            st.dataframe(metric_df.style.applymap(color_score, subset=['Score']), use_container_width=True)
+            
+            # Detailed records
+            with st.expander("📝 View Detailed Records"):
+                display_df = records_df[['input', 'output'] + available_metrics].copy()
+                display_df['input'] = display_df['input'].str[:100] + "..."
+                display_df['output'] = display_df['output'].str[:200] + "..."
+                st.dataframe(display_df, use_container_width=True)
+            
+            # Export
+            csv = records_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv,
+                file_name=f"trulens_results_{RUN_ID}.csv",
+                mime="text/csv"
+            )
 
 # ============================================
 # STREAMLIT UI
@@ -339,6 +452,9 @@ def main():
     if 'dashboard_launched' not in st.session_state:
         st.session_state['dashboard_launched'] = False
     
+    if 'use_simple_dashboard' not in st.session_state:
+        st.session_state['use_simple_dashboard'] = False
+    
     # Show evaluation button
     if not st.session_state['evaluation_done']:
         st.info("Click the button below to start the RAG evaluation.")
@@ -358,66 +474,32 @@ def main():
     else:
         st.success("✅ Evaluation completed!")
         
-        # Show TruLens Dashboard button
+        # Try to launch dashboard if not already launched
         if not st.session_state['dashboard_launched']:
-            if st.button("📊 Open TruLens Dashboard", type="primary", use_container_width=True):
+            with st.spinner("Starting TruLens dashboard..."):
                 url = launch_dashboard()
                 if url:
+                    st.rerun()
+                else:
+                    st.session_state['use_simple_dashboard'] = True
                     st.session_state['dashboard_launched'] = True
                     st.rerun()
-        else:
-            # Show dashboard URL - THIS WILL WORK WITH STREAMLIT CLOUD
-            if 'dashboard_url' in st.session_state:
-                st.markdown(f"""
-                ### ✅ TruLens Dashboard is running!
-                
-                The dashboard is available at:
-                
-                🔗 **`{st.session_state['dashboard_url']}`**
-                
-                💡 **Note:** Since this is running on Streamlit Cloud, the URL above will be automatically forwarded. 
-                Click the link or open it in a new tab.
-                """)
-                
-                # Create a clickable link
-                st.markdown(f"""
-                [**Click here to open TruLens Dashboard**]({st.session_state['dashboard_url']})
-                """)
-                
-                st.info("📌 The dashboard will remain active until you close this session.")
-            
-            # Show option to restart dashboard
-            if st.button("🔄 Restart Dashboard"):
-                st.session_state['dashboard_launched'] = False
-                if 'dashboard_process' in st.session_state:
-                    try:
-                        st.session_state['dashboard_process'].terminate()
-                    except:
-                        pass
-                st.rerun()
         
-        # Show summary of results
-        if 'records_df' in st.session_state:
-            records_df = st.session_state['records_df']
-            st.subheader("📊 Evaluation Summary")
+        # Show dashboard based on type
+        if st.session_state.get('use_simple_dashboard', False):
+            show_simple_dashboard()
+        elif 'dashboard_url' in st.session_state:
+            st.markdown(f"""
+            ### 📊 TruLens Dashboard
             
-            col1, col2, col3, col4 = st.columns(4)
-            metric_cols = ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness']
-            available_metrics = [col for col in metric_cols if col in records_df.columns]
+            [**Open TruLens Dashboard**]({st.session_state['dashboard_url']})
+            """)
             
-            with col1:
-                st.metric("Total Questions", len(records_df))
-            
-            if available_metrics:
-                avg_score = records_df[available_metrics].mean().mean()
-                with col2:
-                    st.metric("Average Score", f"{avg_score:.3f}")
-                
-                # Show individual metrics
-                st.subheader("📈 Individual Metrics")
-                metric_df = records_df[available_metrics].mean().reset_index()
-                metric_df.columns = ['Metric', 'Score']
-                st.dataframe(metric_df, use_container_width=True)
+            # Try to embed in iframe
+            try:
+                st.components.v1.iframe(st.session_state['dashboard_url'], height=800, scrolling=True)
+            except:
+                st.info(f"Dashboard running at: {st.session_state['dashboard_url']}")
     
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Built with TruLens • {datetime.now().strftime('%Y-%m-%d %H:%M')}")

@@ -25,3 +25,4 @@ jsonschema
 torch 
 torchvision  
 torchaudio
+sqlalchemy
