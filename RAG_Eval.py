@@ -25,7 +25,7 @@ from llama_index.llms.groq import Groq as LlamaGroq
 from trulens.core import TruSession, Feedback
 from trulens.core.database.sqlalchemy import SQLAlchemyDB
 from trulens.core.database.connector import DBConnector
-from trulens.apps import TruApp
+from trulens.apps.app import TruApp
 
 load_dotenv()
 
