@@ -1,19 +1,27 @@
-# rag_eval_final_complete.py
+# RAG_Eval.py
 import os
 import time
 import re
-import numpy as np
-import pandas as pd
+import warnings
 from dotenv import load_dotenv
 from datetime import datetime
+
+warnings.filterwarnings('ignore')
+
+# TruLens environment MUST be set first
+os.environ["TRULENS_OTEL_TRACING"] = "1"
+os.environ["TRULENS_OTEL_ENABLED"] = "true"
+os.environ["OTEL_SDK_DISABLED"] = "false"
 
 from pinecone import Pinecone
 from google import genai
 from google.genai import types
-
 from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
+from trulens.core import TruSession, Feedback
+from trulens.apps.app import TruApp
+from functools import partial
 
 load_dotenv()
 
@@ -23,14 +31,13 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME", "studybuddy")
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+APP_NAME = f"RAG_Eval_{RUN_ID}"
 
 # ============================================
-# 1. CUSTOM EMBEDDING CLASS
+# EMBEDDING
 # ============================================
 
 class GeminiDirectEmbedding(BaseEmbedding):
-    """Direct Gemini embedding without LlamaIndex wrapper"""
-    
     api_key: str
     model_name: str = "gemini-embedding-2"
     dimension: int = 768
@@ -63,13 +70,10 @@ class GeminiDirectEmbedding(BaseEmbedding):
                 return None
             if len(text) > 8000:
                 text = text[:8000]
-            
             result = self.client.models.embed_content(
-                model=self.model_name,
-                contents=[text],
+                model=self.model_name, contents=[text],
                 config=types.EmbedContentConfig(output_dimensionality=self.dimension)
             )
-            
             if result and result.embeddings and len(result.embeddings) > 0:
                 emb = result.embeddings[0].values
                 norm = sum(v**2 for v in emb) ** 0.5
@@ -84,101 +88,35 @@ class GeminiDirectEmbedding(BaseEmbedding):
         return "GeminiDirectEmbedding"
 
 # ============================================
-# 2. OPTIMIZED RAG WITH SENTENCE WINDOW
+# RAG
 # ============================================
 
 class OptimizedRAG:
-    """RAG with Sentence Window - Best for Groundedness & Correctness"""
-    
     def __init__(self, pinecone_index, embed_model, llm):
         self.pinecone_index = pinecone_index
         self.embed_model = embed_model
         self.llm = llm
     
-    def retrieve_with_sentence_window(self, query: str, top_k: int = 5, window_size: int = 3) -> list:
-        """Sentence Window Retrieval"""
-        try:
-            query_embedding = self.embed_model._embed_text(query)
-            if not query_embedding:
-                return []
-            
-            results = self.pinecone_index.query(
-                vector=query_embedding,
-                top_k=15,
-                include_metadata=True
-            )
-            
-            documents = []
-            for match in results.matches:
-                if match.metadata and 'text' in match.metadata:
-                    documents.append({
-                        'text': match.metadata['text'],
-                        'score': match.score,
-                        'metadata': match.metadata
-                    })
-            
-            expanded_docs = []
-            seen_texts = set()
-            automata_keywords = {'alphabet', 'string', 'language', 'automata', 'state', 
-                                'symbol', 'empty', 'kleene', 'regular', 'expression',
-                                'formal', 'closure', 'transition', 'dfa', 'nfa', 'epsilon'}
-            
-            for doc in documents:
-                text = doc['text']
-                if text in seen_texts:
-                    continue
-                seen_texts.add(text)
-                
-                sentences = re.split(r'(?<=[.!?])\s+', text)
-                
-                if len(sentences) <= window_size * 2:
-                    expanded_docs.append(doc)
-                    continue
-                
-                query_terms = set(query.lower().split())
-                sentence_scores = []
-                for i, sentence in enumerate(sentences):
-                    sentence_terms = set(sentence.lower().split())
-                    overlap = len(query_terms & sentence_terms)
-                    bonus = len(sentence_terms & automata_keywords) * 0.5
-                    sentence_scores.append((i, overlap + bonus))
-                
-                sentence_scores.sort(key=lambda x: x[1], reverse=True)
-                
-                expanded_texts = []
-                for idx, score in sentence_scores[:2]:
-                    start = max(0, idx - window_size)
-                    end = min(len(sentences), idx + window_size + 1)
-                    window_text = ' '.join(sentences[start:end])
-                    expanded_texts.append(window_text)
-                
-                expanded_text = ' ... '.join(expanded_texts)
-                expanded_docs.append({
-                    'text': expanded_text,
-                    'score': doc['score'],
-                    'metadata': {**doc['metadata'], 'strategy': 'sentence_window'}
-                })
-            
-            expanded_docs.sort(key=lambda x: x['score'], reverse=True)
-            return expanded_docs[:top_k]
-        except Exception:
-            return []
-    
     def query(self, question: str) -> str:
-        """Generate answer using Sentence Window retrieval"""
         try:
-            documents = self.retrieve_with_sentence_window(question)
-            
-            if not documents:
+            query_embedding = self.embed_model._embed_text(question)
+            if not query_embedding:
                 return "No relevant documents found."
             
-            top_docs = documents[:5]
-            context_text = "\n\n".join([doc['text'] for doc in top_docs])
+            results = self.pinecone_index.query(vector=query_embedding, top_k=5, include_metadata=True)
             
-            prompt = f"""You are an expert in automata theory. Answer based on the context provided.
+            contexts = []
+            for match in results.matches:
+                if match.metadata and 'text' in match.metadata:
+                    contexts.append(match.metadata['text'][:800])
+            
+            if not contexts:
+                return "No relevant documents found."
+            
+            prompt = f"""Answer based on context.
 
 CONTEXT:
-{context_text}
+{chr(10).join(contexts)}
 
 QUESTION:
 {question}
@@ -191,203 +129,119 @@ ANSWER:"""
             return f"Error: {e}"
 
 # ============================================
-# 3. MODEL ROUTING STRATEGY
+# MODEL ROUTER
 # ============================================
 
-MODEL_CONFIGS = {
-    'fast': {'model': 'llama-3.1-8b-instant', 'use_for': ['relevance', 'quality']},
-    'primary': {'model': 'llama-3.3-70b-versatile', 'use_for': ['groundedness', 'correctness']},
-    'context': {'model': 'llama-3.1-8b-instant', 'use_for': ['context_relevance']}
-}
-
 class ModelRouter:
-    """Routes evaluation tasks to dedicated models"""
-    
     def __init__(self, api_key: str):
         from groq import Groq as GroqClient
         self.client = GroqClient(api_key=api_key)
-        
-    def clean_score(self, text: str) -> float:
-        if not text:
-            return None
-        cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-        if not cleaned:
-            cleaned = text
-        patterns = [
-            r'(?:score|rating)?\s*[:=]?\s*(\d+\.?\d*)',
-            r'(\d+\.?\d*)\s*\/\s*(?:1|10|100)',
-            r'(\d+\.?\d*)',
-        ]
-        for pattern in patterns:
-            matches = re.findall(pattern, cleaned.lower())
-            if matches:
-                try:
-                    score = float(matches[0])
-                    if score > 1 and score <= 10:
-                        score = score / 10
-                    elif score > 10 and score <= 100:
-                        score = score / 100
-                    return max(0.0, min(1.0, score))
-                except:
-                    continue
-        return None
     
-    def call_model(self, prompt: str, model: str, max_retries: int = 3) -> float:
-        for attempt in range(max_retries):
-            try:
-                response = self.client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "Output ONLY a number between 0 and 1."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0, max_tokens=10
-                )
-                
-                score = self.clean_score(response.choices[0].message.content.strip())
-                if score is not None:
-                    return score
-                elif attempt < max_retries - 1:
-                    time.sleep(2)
-                else:
-                    return 0.5
-            except Exception:
-                if attempt < max_retries - 1:
-                    time.sleep(5)
-                else:
-                    return 0.5
-        return 0.5
-    
-    def evaluate(self, task_type: str, prompt: str) -> float:
-        task_model_map = {
-            'relevance': MODEL_CONFIGS['fast'],
-            'quality': MODEL_CONFIGS['fast'],
-            'groundedness': MODEL_CONFIGS['primary'],
-            'context_relevance': MODEL_CONFIGS['context'],
-            'correctness': MODEL_CONFIGS['primary']
-        }
-        config = task_model_map.get(task_type, MODEL_CONFIGS['fast'])
-        return self.call_model(prompt, config['model'])
+    def call_model(self, prompt: str, model: str) -> float:
+        try:
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": "Output ONLY a number 0-1."}, {"role": "user", "content": prompt}],
+                temperature=0, max_tokens=10
+            )
+            text = response.choices[0].message.content.strip()
+            nums = re.findall(r'(\d+\.?\d*)', text)
+            if nums:
+                score = float(nums[0])
+                if score > 1 and score <= 100:
+                    score = score / 100
+                return max(0.0, min(1.0, score))
+            return 0.5
+        except Exception:
+            return 0.5
 
 # ============================================
-# 4. METRIC EVALUATORS
+# TRULENS FEEDBACK FUNCTIONS
 # ============================================
 
-def evaluate_relevance(input: str, output: str, router: ModelRouter) -> float:
-    prompt = f"""Score relevance from 0 to 1. Output only the number.
-Question: {input[:300]}
-Answer: {output[:300] if output else "None"}
-Score:"""
-    return router.evaluate('relevance', prompt)
+router = None
 
-def evaluate_quality(input: str, output: str, router: ModelRouter) -> float:
-    prompt = f"""Score quality from 0 to 1. Output only the number.
-Question: {input[:300]}
-Answer: {output[:300] if output else "None"}
-Score:"""
-    return router.evaluate('quality', prompt)
+def get_router():
+    global router
+    if router is None:
+        router = ModelRouter(GROQ_API_KEY)
+    return router
 
-def evaluate_groundedness(input: str, output: str, router: ModelRouter) -> float:
-    prompt = f"""Score factual reliability from 0 to 1. Output only the number.
-Question: {input[:300]}
-Answer: {output[:300] if output else "None"}
-Score:"""
-    return router.evaluate('groundedness', prompt)
+def relevance(input: str, output: str) -> float:
+    r = get_router()
+    return r.call_model(f"Score relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
 
-def evaluate_context_relevance(input: str, output: str, router: ModelRouter) -> float:
-    prompt = f"""Score context relevance from 0 to 1. Output only the number.
-Question: {input[:300]}
-Answer: {output[:300] if output else "None"}
-Score:"""
-    return router.evaluate('context_relevance', prompt)
+def quality(input: str, output: str) -> float:
+    r = get_router()
+    return r.call_model(f"Score quality 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
 
-def evaluate_correctness(input: str, output: str, router: ModelRouter) -> float:
-    prompt = f"""Score correctness from 0 to 1. Output only the number.
-Question: {input[:300]}
-Answer: {output[:300] if output else "None"}
-Score:"""
-    return router.evaluate('correctness', prompt)
+def groundedness(input: str, output: str) -> float:
+    r = get_router()
+    return r.call_model(f"Score groundedness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
+
+def context_relevance(input: str, output: str) -> float:
+    r = get_router()
+    return r.call_model(f"Score context relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
 
 # ============================================
-# 5. MAIN EXECUTION
+# MAIN
 # ============================================
 
-def run_evaluation(eval_questions=None):
-    """Run evaluation and return results DataFrame"""
+def main():
+    print(f"\n🔍 TruLens Evaluation: {APP_NAME}")
     
-    if eval_questions is None:
-        eval_questions = [
-            
-            "Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z], what pattern does it represent and what is its limitation?",
-            "List three software applications using automata.",
-        ]
-    
-    embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY, model_name="gemini-embedding-2", dimension=768)
+    # Setup
+    embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
     llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
     Settings.embed_model = embed_model
     Settings.llm = llm
     
     pc = Pinecone(api_key=PINECONE_API_KEY)
-    if INDEX_NAME not in [idx.name for idx in pc.list_indexes()]:
-        raise ValueError(f"Index '{INDEX_NAME}' not found!")
-    
     pinecone_index = pc.Index(INDEX_NAME)
     rag = OptimizedRAG(pinecone_index, embed_model, llm)
     
-    # Phase 1: Generate answers
-    answers, latencies = [], []
-    for q in eval_questions:
-        start_time = time.time()
-        answer = rag.query(q)
-        latency = time.time() - start_time
-        answers.append(answer)
-        latencies.append(latency)
+    # Wrap for TruLens
+    class RAGWrapper:
+        def respond(self, question: str) -> str:
+            return rag.query(question)
     
-    # Phase 2: Calculate metrics
-    router = ModelRouter(GROQ_API_KEY)
-    metrics_data = []
+    rag_wrapper = RAGWrapper()
     
-    for q, a, lat in zip(eval_questions, answers, latencies):
-        metrics_data.append({
-            'question': q,
-            'answer': a[:200] + "...",
-            'relevance': evaluate_relevance(q, a, router),
-            'quality': evaluate_quality(q, a, router),
-            'groundedness': evaluate_groundedness(q, a, router),
-            'context_relevance': evaluate_context_relevance(q, a, router),
-            'correctness': evaluate_correctness(q, a, router),
-            'latency': lat,
-            'run_id': RUN_ID,
-            'strategy': 'sentence_window'
-        })
+    # TruLens Session
+    session = TruSession()
     
-    df_metrics = pd.DataFrame(metrics_data)
+    # Feedback
+    f_relevance = Feedback(relevance, name="Relevance").on_input_output()
+    f_quality = Feedback(quality, name="Quality").on_input_output()
+    f_groundedness = Feedback(groundedness, name="Groundedness").on_input_output()
+    f_context_relevance = Feedback(context_relevance, name="Context Relevance").on_input_output()
     
-    # Save files
-    df_metrics.to_csv(f"trulens_results_{RUN_ID}.csv", index=False)
-    df_metrics.to_csv("trulens_results_latest.csv", index=False)
+    # TruLens App
+    tru_app = TruApp(
+        rag_wrapper,
+        app_name=APP_NAME,
+        app_version="v1.0",
+        feedbacks=[f_relevance, f_quality, f_groundedness, f_context_relevance],
+        main_method=rag_wrapper.respond
+    )
     
-    history_file = "trulens_results_history.csv"
-    if os.path.exists(history_file):
-        df_history = pd.read_csv(history_file)
-        df_history = pd.concat([df_history, df_metrics], ignore_index=True)
-    else:
-        df_history = df_metrics
-    df_history.to_csv(history_file, index=False)
+    # Questions
+    questions = [
+        "What is an alphabet in automata theory?",
+        
+        "List three software applications using automata.",
+    ]
     
-    return df_metrics
-
-def main():
-    """Run evaluation and save results"""
-    df = run_evaluation()
+    # Record with TruLens
+    print("\n📊 Recording with TruLens...")
+    with tru_app as recording:
+        for i, q in enumerate(questions, 1):
+            print(f"  {i}/{len(questions)}: {q[:50]}...")
+            rag_wrapper.respond(q)
     
-    print("\n📈 Overall Averages:")
-    for metric in ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness']:
-        avg = df[metric].mean()
-        status = "✅ high" if avg >= 0.7 else "⚠️ medium" if avg >= 0.5 else "🛑 low"
-        print(f"  {metric.replace('_', ' ').title()}: {avg:.3f} {status}")
-    print(f"  Average Latency: {df['latency'].mean():.2f}s")
-    print(f"\n💾 Results saved: trulens_results_{RUN_ID}.csv")
+    print("✅ Recording complete")
+    print(f"\n🌐 Open TruLens Dashboard: trulens dashboard")
+    print(f"📱 Select app: {APP_NAME}")
 
 if __name__ == "__main__":
     main()
