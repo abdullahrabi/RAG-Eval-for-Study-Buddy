@@ -311,23 +311,41 @@ if __name__ == "__main__":
         print("\n" + "="*60)
         print("📊 Launching TruLens Dashboard...")
         print("="*60)
-        print("\n🌐 Dashboard will open at: http://localhost:8501")
-        print("✅ Dashboard is running. Press Ctrl+C to stop.\n")
         
-        # Launch dashboard as a subprocess and keep it running
+        # The correct way to launch the dashboard
         try:
-            # Try the session method first
-            session.run_dashboard(port=8501, host="0.0.0.0")
+            # Import the dashboard runner
+            from trulens.dashboard import run_dashboard
+            
+            # Run the dashboard - this will bind to all interfaces
+            print("Starting dashboard on port 8501...")
+            run_dashboard(session=session, port=8501)
+            
         except Exception as e:
-            print(f"Session dashboard failed: {e}")
+            print(f"Dashboard error: {e}")
+            print("Trying alternative method...")
+            
+            # Alternative: Use streamlit directly
             try:
-                # Fallback: Use subprocess
-                process = subprocess.Popen(
-                    [sys.executable, "-m", "trulens.dashboard", "--port", "8501", "--host", "0.0.0.0"]
-                )
-                print(f"✅ Dashboard process started (PID: {process.pid})")
-                process.wait()
+                import streamlit.web.cli as stcli
+                import sys
+                
+                # Find the dashboard module path
+                import trulens.dashboard as dashboard_module
+                dashboard_path = os.path.dirname(dashboard_module.__file__)
+                dashboard_file = os.path.join(dashboard_path, 'app.py')
+                
+                if os.path.exists(dashboard_file):
+                    sys.argv = [
+                        "streamlit", "run", dashboard_file,
+                        "--server.port", "8501",
+                        "--server.address", "0.0.0.0",
+                        "--server.headless", "true"
+                    ]
+                    stcli.main()
             except Exception as e2:
-                print(f"Could not launch dashboard: {e2}")
+                print(f"Alternative also failed: {e2}")
+                print("\n💡 Dashboard could not be started automatically.")
+                print("But you can still access your results via the CSV file.")
     else:
         print("\n❌ Evaluation failed. Check the logs above.")
