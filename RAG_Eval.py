@@ -13,6 +13,15 @@ os.environ["TRULENS_OTEL_TRACING"] = "1"
 os.environ["TRULENS_OTEL_ENABLED"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "false"
 
+# ===== FIX: Delete old TruLens DB on cloud =====
+if os.path.exists("default.sqlite"):
+    try:
+        os.remove("default.sqlite")
+        print("🗑️ Cleared old TruLens database")
+    except:
+        pass
+# =============================================
+
 from pinecone import Pinecone
 from google import genai
 from google.genai import types
@@ -208,7 +217,7 @@ def main():
     
     rag_wrapper = RAGWrapper()
     
-    # TruLens
+    # TruLens with fresh DB
     session = TruSession()
     
     f_relevance = Feedback(relevance, name="Relevance").on_input_output()
@@ -226,11 +235,11 @@ def main():
     )
     
     questions = [
+        
         "Given the regular expression [A-Z][a-z]* [ ][A-Z][A-Z], what pattern does it represent and what is its limitation?",
         "List three software applications using automata.",
     ]
     
-    # Record
     print("\n📊 Recording with TruLens...")
     with tru_app as recording:
         for i, q in enumerate(questions, 1):
@@ -238,8 +247,6 @@ def main():
             rag_wrapper.respond(q)
     
     print("✅ Recording complete")
-    
-    # Wait and get TruLens records
     print("\n⏳ Waiting for TruLens feedback...")
     time.sleep(30)
     
@@ -249,22 +256,16 @@ def main():
         
         if records_df is not None and len(records_df) > 0:
             records_df.to_csv(f"trulens_records_{RUN_ID}.csv", index=False)
-            print(f"✅ TruLens records saved: {len(records_df)} records")
+            print(f"✅ TruLens records: {len(records_df)}")
             
-            # Print TruLens metrics
-            print("\n📊 TruLens Metrics:")
             feedback_cols = ['relevance', 'quality', 'groundedness', 'context_relevance', 'correctness']
             for col in feedback_cols:
                 if col in records_df.columns:
                     print(f"  {col}: {records_df[col].mean():.3f}")
-        else:
-            print("⚠️ No TruLens records found")
     except Exception as e:
-        print(f"⚠️ TruLens feedback wait error: {e}")
+        print(f"⚠️ Error: {e}")
     
     print(f"\n📱 App: {APP_NAME}")
-    print("📁 CSV: trulens_records_" + RUN_ID + ".csv")
-    print("📊 TruLens DB saved for dashboard")
 
 if __name__ == "__main__":
     main()
