@@ -33,7 +33,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME", "studybuddy")
-PORT = int(os.getenv("PORT", 8501))
+PORT = int(os.getenv("PORT", 8080))
 
 print(f"GEMINI_API_KEY: {'✅' if GEMINI_API_KEY else '❌'}")
 print(f"PINECONE_API_KEY: {'✅' if PINECONE_API_KEY else '❌'}")
