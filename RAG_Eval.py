@@ -1,7 +1,6 @@
 """
-RAG_Eval_All_Users_TruLens.py - FINAL VERSION
-Complete TruLens integration with default.sqlite database
-Multi-user RAG evaluation with real-time dashboard
+RAG_Eval_All_Users_TruLens.py - FINAL WORKING VERSION
+Based on your working code - uses TruLens default.sqlite correctly
 """
 
 import os
@@ -16,8 +15,6 @@ import sys
 import threading
 import subprocess
 import sqlite3
-import pickle
-import hashlib
 
 warnings.filterwarnings('ignore')
 
@@ -63,17 +60,15 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports - CORRECT WAY
+# TruLens imports - CORRECT WAY (from your working code)
 try:
     from trulens.core import TruSession, Feedback
     from trulens.apps.app import TruApp
-    from trulens.core.feedback import Feedback as TruFeedback
     TRULENS_AVAILABLE = True
     print("✅ TruLens available")
 except ImportError as e:
     TRULENS_AVAILABLE = False
     print(f"⚠️ TruLens not available: {e}")
-    print("⚠️ Install with: pip install trulens-eval")
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 APP_NAME = f"RAG_Eval_{RUN_ID}"
@@ -175,31 +170,26 @@ def get_router():
     return _router
 
 # ============================================
-# FEEDBACK FUNCTIONS - PROPERLY DEFINED
+# FEEDBACK FUNCTIONS - SAME AS YOUR WORKING CODE
 # ============================================
 
 def feedback_relevance(input: str, output: str) -> float:
-    """Evaluate relevance of response to question"""
     router = get_router()
     return router.call_model(f"Score relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
 
 def feedback_quality(input: str, output: str) -> float:
-    """Evaluate quality of response"""
     router = get_router()
     return router.call_model(f"Score quality 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
 
 def feedback_groundedness(input: str, output: str) -> float:
-    """Evaluate groundedness in context"""
     router = get_router()
     return router.call_model(f"Score groundedness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
 
 def feedback_context_relevance(input: str, output: str) -> float:
-    """Evaluate context relevance"""
     router = get_router()
     return router.call_model(f"Score context relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
 
 def feedback_correctness(input: str, output: str) -> float:
-    """Evaluate factual correctness"""
     router = get_router()
     return router.call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
 
@@ -420,7 +410,7 @@ ANSWER:"""
             return f"Error: {e}"
 
 # ============================================
-# EVALUATOR WITH TRULENS DEFAULT.SQLITE
+# EVALUATOR WITH TRULENS - USING YOUR WORKING APPROACH
 # ============================================
 
 class TruLensBackgroundEvaluator:
@@ -429,7 +419,7 @@ class TruLensBackgroundEvaluator:
         self.thread = None
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Initialize TruLens session with default.sqlite
+        # Initialize TruLens session with default.sqlite (YOUR WORKING APPROACH)
         self.db_path = "default.sqlite"
         self.session = None
         self.tru_app = None
@@ -437,7 +427,7 @@ class TruLensBackgroundEvaluator:
         
         if TRULENS_AVAILABLE:
             try:
-                # Initialize TruSession with default.sqlite
+                # CORRECT WAY - same as your working code
                 self.session = TruSession(database_url="sqlite:///default.sqlite")
                 print(f"✅ TruLens session initialized with {self.db_path}")
                 print(f"📁 Database location: {os.path.abspath(self.db_path)}")
@@ -489,41 +479,11 @@ class TruLensBackgroundEvaluator:
                 )
             """)
             
-            # TruLens records table (if not exists)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS trulens_records (
-                    record_id TEXT PRIMARY KEY,
-                    app_id TEXT,
-                    input TEXT,
-                    output TEXT,
-                    timestamp DATETIME,
-                    cost REAL,
-                    latency REAL,
-                    tags TEXT,
-                    meta TEXT,
-                    status TEXT
-                )
-            """)
-            
-            # TruLens feedback table (if not exists)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS trulens_feedback (
-                    feedback_id TEXT PRIMARY KEY,
-                    record_id TEXT,
-                    name TEXT,
-                    result REAL,
-                    reason TEXT,
-                    timestamp DATETIME,
-                    cost REAL,
-                    latency REAL
-                )
-            """)
-            
             conn.commit()
             conn.close()
-            print("✅ All tables initialized for dashboard and TruLens")
+            print("✅ Custom tables initialized for dashboard")
         except Exception as e:
-            print(f"⚠️ Tables error: {e}")
+            print(f"⚠️ Custom tables error: {e}")
     
     def save_evaluation(self, data: Dict):
         """Save evaluation to custom tables"""
@@ -653,7 +613,7 @@ class TruLensBackgroundEvaluator:
                 # Create RAG instance
                 rag = OptimizedRAG(pinecone_index, embed_model, llm, user_id=user_id)
                 
-                # Create RAG wrapper for TruLens
+                # Create RAG wrapper for TruLens - SAME AS YOUR WORKING CODE
                 class RAGWrapper:
                     def __init__(self, rag_instance):
                         self.rag = rag_instance
@@ -664,37 +624,18 @@ class TruLensBackgroundEvaluator:
                 self.rag_wrapper = RAGWrapper(rag)
                 
                 # ============================================
-                # TRULENS EVALUATION - CORRECT WAY
+                # TRULENS EVALUATION - SAME AS YOUR WORKING CODE
                 # ============================================
                 if TRULENS_AVAILABLE and self.session:
                     try:
-                        # Create feedback functions using TruLens Feedback
-                        f_relevance = Feedback(
-                            feedback_relevance, 
-                            name="Relevance"
-                        ).on_input_output()
+                        # Create feedback functions - SAME AS YOUR WORKING CODE
+                        f_relevance = Feedback(feedback_relevance, name="Relevance").on_input_output()
+                        f_quality = Feedback(feedback_quality, name="Quality").on_input_output()
+                        f_groundedness = Feedback(feedback_groundedness, name="Groundedness").on_input_output()
+                        f_context_relevance = Feedback(feedback_context_relevance, name="Context Relevance").on_input_output()
+                        f_correctness = Feedback(feedback_correctness, name="Correctness").on_input_output()
                         
-                        f_quality = Feedback(
-                            feedback_quality, 
-                            name="Quality"
-                        ).on_input_output()
-                        
-                        f_groundedness = Feedback(
-                            feedback_groundedness, 
-                            name="Groundedness"
-                        ).on_input_output()
-                        
-                        f_context_relevance = Feedback(
-                            feedback_context_relevance, 
-                            name="Context Relevance"
-                        ).on_input_output()
-                        
-                        f_correctness = Feedback(
-                            feedback_correctness, 
-                            name="Correctness"
-                        ).on_input_output()
-                        
-                        # Create TruLens app
+                        # Create TruLens app - SAME AS YOUR WORKING CODE
                         self.tru_app = TruApp(
                             self.rag_wrapper,
                             app_name=f"{APP_NAME}_{email}",
@@ -711,6 +652,7 @@ class TruLensBackgroundEvaluator:
                         
                         print(f"🔄 TruLens evaluating {len(questions)} questions for {email}...")
                         
+                        # Run evaluation with TruLens
                         with self.tru_app as recording:
                             for q_idx, question in enumerate(questions, 1):
                                 if not self.running:
@@ -719,7 +661,7 @@ class TruLensBackgroundEvaluator:
                                 print(f"  {q_idx}/{len(questions)}: {question[:50]}...")
                                 response = self.rag_wrapper.respond(question)
                                 
-                                # Also save to custom tables for dashboard
+                                # Save to custom tables for dashboard
                                 scores = {
                                     'relevance': feedback_relevance(question, response),
                                     'quality': feedback_quality(question, response),
@@ -753,7 +695,7 @@ class TruLensBackgroundEvaluator:
                                     'message': f'Evaluated {total_questions} questions'
                                 })
                         
-                        # Wait for TruLens to process feedback
+                        # Wait for TruLens to process feedback - SAME AS YOUR WORKING CODE
                         print("⏳ Waiting for TruLens feedback processing...")
                         time.sleep(5)
                         
@@ -762,7 +704,6 @@ class TruLensBackgroundEvaluator:
                     except Exception as e:
                         print(f"⚠️ TruLens evaluation error: {e}")
                         print("🔄 Falling back to basic evaluation...")
-                        # Fallback to basic evaluation
                         self._run_basic_evaluation(questions, user_id, email, rag, total_questions, users)
                         total_questions += len(questions)
                 else:
@@ -875,7 +816,7 @@ st.set_page_config(
 )
 
 st.title("📊 Live RAG Evaluation Dashboard")
-st.caption(f"📁 Database: default.sqlite | 🏷️ TruLens Powered")
+st.caption(f"📁 Database: default.sqlite | 🔧 TruLens Powered")
 
 DB_PATH = "default.sqlite"
 
