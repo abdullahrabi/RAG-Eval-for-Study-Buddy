@@ -13,4 +13,4 @@ if __name__ == "__main__":
     print("="*60)
     
     # Run the main file
-    subprocess.run(["python", "RAG_Eval_All_Users.py"])
+    subprocess.run(["python", "RAG_Eval.py"])
