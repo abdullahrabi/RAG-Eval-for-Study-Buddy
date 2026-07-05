@@ -1,4 +1,4 @@
-# RAG_Eval_All_Users.py - Complete RAG Evaluation for All Users
+# RAG_Eval_All_Users.py - Live Dashboard with Background Evaluation (Railway Compatible)
 import os
 import time
 import re
@@ -11,14 +11,18 @@ from datetime import datetime
 from typing import List, Dict, Any
 import sys
 import concurrent.futures
-from collections import defaultdict
+import threading
+import subprocess
+import queue
+import sqlite3
+from collections import deque
 
 warnings.filterwarnings('ignore')
 
 load_dotenv()
 
 print("="*60)
-print("🔍 RAG EVALUATION FOR ALL USERS")
+print("🔍 RAG EVALUATION WITH LIVE DASHBOARD")
 print("="*60)
 
 # ============================================
@@ -29,7 +33,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME", "studybuddy")
-PORT = int(os.getenv("PORT", 8501))
+PORT = int(os.getenv("PORT", 8080))
 
 print(f"GEMINI_API_KEY: {'✅' if GEMINI_API_KEY else '❌'}")
 print(f"PINECONE_API_KEY: {'✅' if PINECONE_API_KEY else '❌'}")
@@ -39,10 +43,6 @@ print(f"PORT: {PORT}")
 
 if not GEMINI_API_KEY or not PINECONE_API_KEY or not GROQ_API_KEY:
     print("❌ Missing API keys!")
-    print("\nPlease set the following environment variables:")
-    print("  - GEMINI_API_KEY")
-    print("  - PINECONE_API_KEY")
-    print("  - GROQ_API_KEY")
     sys.exit(1)
 
 # ============================================
@@ -56,21 +56,164 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports
-try:
-    from trulens.core import TruSession, Feedback
-    from trulens.apps.app import TruApp
-    TRULENS_AVAILABLE = True
-except ImportError:
-    TRULENS_AVAILABLE = False
-    print("⚠️ TruLens not available. Running without TruLens.")
-
 # ============================================
-# RUN ID
+# DATABASE FOR REAL-TIME UPDATES
 # ============================================
 
-RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
-APP_NAME = f"RAG_Eval_All_Users_{RUN_ID}"
+class EvalDatabase:
+    def __init__(self, db_path="data/eval_results.db"):
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self._init_db()
+    
+    def _init_db(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                user_id TEXT,
+                email TEXT,
+                question TEXT,
+                response TEXT,
+                relevance REAL,
+                quality REAL,
+                groundedness REAL,
+                context_relevance REAL,
+                correctness REAL,
+                timestamp TEXT,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS eval_status (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                total_users INTEGER DEFAULT 0,
+                completed_users INTEGER DEFAULT 0,
+                total_questions INTEGER DEFAULT 0,
+                completed_questions INTEGER DEFAULT 0,
+                current_user TEXT,
+                status TEXT DEFAULT 'idle',
+                message TEXT,
+                updated_at TEXT
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
+    
+    def save_evaluation(self, data: Dict):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO evaluations (
+                run_id, user_id, email, question, response,
+                relevance, quality, groundedness, context_relevance, correctness,
+                timestamp, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data.get('run_id'),
+            data.get('user_id'),
+            data.get('email'),
+            data.get('question'),
+            data.get('response'),
+            data.get('relevance', 0),
+            data.get('quality', 0),
+            data.get('groundedness', 0),
+            data.get('context_relevance', 0),
+            data.get('correctness', 0),
+            data.get('timestamp', datetime.now().isoformat()),
+            data.get('status', 'completed')
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def update_status(self, status: Dict):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO eval_status (
+                id, run_id, total_users, completed_users,
+                total_questions, completed_questions, current_user,
+                status, message, updated_at
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            status.get('run_id'),
+            status.get('total_users', 0),
+            status.get('completed_users', 0),
+            status.get('total_questions', 0),
+            status.get('completed_questions', 0),
+            status.get('current_user', ''),
+            status.get('status', 'idle'),
+            status.get('message', ''),
+            datetime.now().isoformat()
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_status(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM eval_status ORDER BY id DESC LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'run_id': row[1],
+                'total_users': row[2],
+                'completed_users': row[3],
+                'total_questions': row[4],
+                'completed_questions': row[5],
+                'current_user': row[6],
+                'status': row[7],
+                'message': row[8],
+                'updated_at': row[9]
+            }
+        return None
+    
+    def get_results(self, limit: int = 100):
+        conn = sqlite3.connect(self.db_path)
+        df = pd.read_sql_query(
+            "SELECT * FROM evaluations ORDER BY timestamp DESC LIMIT ?",
+            conn, params=(limit,)
+        )
+        conn.close()
+        return df
+    
+    def get_summary(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total,
+                AVG(relevance) as avg_relevance,
+                AVG(quality) as avg_quality,
+                AVG(groundedness) as avg_groundedness,
+                AVG(context_relevance) as avg_context_relevance,
+                AVG(correctness) as avg_correctness
+            FROM evaluations
+        """)
+        row = cursor.fetchone()
+        conn.close()
+        
+        return {
+            'total': row[0] or 0,
+            'avg_relevance': row[1] or 0,
+            'avg_quality': row[2] or 0,
+            'avg_groundedness': row[3] or 0,
+            'avg_context_relevance': row[4] or 0,
+            'avg_correctness': row[5] or 0
+        }
 
 # ============================================
 # GEMINI EMBEDDING
@@ -131,7 +274,6 @@ class GeminiDirectEmbedding(BaseEmbedding):
 # ============================================
 
 def fetch_all_users(pinecone_index) -> List[Dict]:
-    """Fetch all unique user IDs from Pinecone"""
     print("\n🔍 Fetching all users from Pinecone...")
     
     try:
@@ -172,7 +314,6 @@ def fetch_all_users(pinecone_index) -> List[Dict]:
 # ============================================
 
 def fetch_user_notes(pinecone_index, user_id: str) -> List[Dict]:
-    """Fetch all notes for a specific user"""
     try:
         import random
         dummy_vector = [random.uniform(0.01, 0.02) for _ in range(768)]
@@ -210,7 +351,6 @@ def fetch_user_notes(pinecone_index, user_id: str) -> List[Dict]:
 # ============================================
 
 def generate_questions_from_notes(notes: List[Dict], num_questions: int = 20) -> List[str]:
-    """Generate questions based on user's notes content"""
     if not notes:
         return []
     
@@ -264,7 +404,6 @@ Generate exactly {num_questions} questions as a numbered list:"""
         return generate_fallback_questions(full_text, num_questions)
 
 def generate_fallback_questions(text: str, num_questions: int = 20) -> List[str]:
-    """Generate fallback questions"""
     default_questions = [
         "What is automata theory?",
         "What is a finite automaton?",
@@ -283,58 +422,6 @@ def generate_fallback_questions(text: str, num_questions: int = 20) -> List[str]
         questions.append(default_questions[len(questions) % len(default_questions)])
     
     return questions
-
-# ============================================
-# OPTIMIZED RAG SYSTEM
-# ============================================
-
-class OptimizedRAG:
-    def __init__(self, pinecone_index, embed_model, llm, user_id: str = None):
-        self.pinecone_index = pinecone_index
-        self.embed_model = embed_model
-        self.llm = llm
-        self.user_id = user_id
-    
-    def query(self, question: str) -> str:
-        try:
-            query_embedding = self.embed_model._embed_text(question)
-            if not query_embedding:
-                return "No relevant documents found."
-            
-            filter_dict = {}
-            if self.user_id:
-                filter_dict["user_id"] = {"$eq": self.user_id}
-            
-            results = self.pinecone_index.query(
-                vector=query_embedding,
-                top_k=5,
-                include_metadata=True,
-                namespace="notes",
-                filter=filter_dict
-            )
-            
-            contexts = []
-            for match in results.matches:
-                if match.metadata and 'text' in match.metadata:
-                    contexts.append(match.metadata['text'][:800])
-            
-            if not contexts:
-                return "No relevant documents found for this user."
-            
-            prompt = f"""Answer based on context.
-
-CONTEXT:
-{chr(10).join(contexts)}
-
-QUESTION:
-{question}
-
-ANSWER:"""
-            
-            response = self.llm.complete(prompt)
-            return str(response).strip()
-        except Exception as e:
-            return f"Error: {e}"
 
 # ============================================
 # MODEL ROUTER FOR FEEDBACK
@@ -397,206 +484,401 @@ def evaluate_correctness(input: str, output: str) -> float:
     return get_router().call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
 
 # ============================================
-# EVALUATE SINGLE USER
+# OPTIMIZED RAG SYSTEM
 # ============================================
 
-def evaluate_user_direct(user_data: Dict, pinecone_index, embed_model, llm) -> Dict:
-    """Evaluate a single user's RAG performance directly"""
-    user_id = user_data['user_id']
-    email = user_data['email']
+class OptimizedRAG:
+    def __init__(self, pinecone_index, embed_model, llm, user_id: str = None):
+        self.pinecone_index = pinecone_index
+        self.embed_model = embed_model
+        self.llm = llm
+        self.user_id = user_id
     
-    print(f"\n📊 Evaluating user: {email} ({user_id})")
-    
-    notes = fetch_user_notes(pinecone_index, user_id)
-    
-    if not notes:
-        print(f"  ⚠️ No notes found for {email}")
-        return {
-            'user_id': user_id,
-            'email': email,
-            'notes_count': 0,
-            'questions': [],
-            'success': False,
-            'error': 'No notes found'
-        }
-    
-    print(f"  📝 Found {len(notes)} note chunks")
-    
-    questions = generate_questions_from_notes(notes, num_questions=20)
-    
-    if not questions:
-        print(f"  ⚠️ Could not generate questions for {email}")
-        return {
-            'user_id': user_id,
-            'email': email,
-            'notes_count': len(notes),
-            'questions': [],
-            'success': False,
-            'error': 'No questions generated'
-        }
-    
-    print(f"  ❓ Generated {len(questions)} questions")
-    
-    rag = OptimizedRAG(pinecone_index, embed_model, llm, user_id=user_id)
-    
-    results = []
-    for i, q in enumerate(questions, 1):
-        print(f"    {i}/{len(questions)}: {q[:40]}...")
-        
-        response = rag.query(q)
-        
-        scores = {
-            'relevance': evaluate_relevance(q, response),
-            'quality': evaluate_quality(q, response),
-            'groundedness': evaluate_groundedness(q, response),
-            'context_relevance': evaluate_context_relevance(q, response),
-            'correctness': evaluate_correctness(q, response)
-        }
-        
-        results.append({
-            'question': q,
-            'response': response[:500],
-            'scores': scores
-        })
-    
-    avg_scores = {
-        'relevance': sum(r['scores']['relevance'] for r in results) / len(results) if results else 0,
-        'quality': sum(r['scores']['quality'] for r in results) / len(results) if results else 0,
-        'groundedness': sum(r['scores']['groundedness'] for r in results) / len(results) if results else 0,
-        'context_relevance': sum(r['scores']['context_relevance'] for r in results) / len(results) if results else 0,
-        'correctness': sum(r['scores']['correctness'] for r in results) / len(results) if results else 0
-    }
-    
-    print(f"  ✅ Completed: {len(results)} questions evaluated")
-    print(f"  📊 Avg Relevance: {avg_scores['relevance']*100:.1f}%")
-    
-    return {
-        'user_id': user_id,
-        'email': email,
-        'notes_count': len(notes),
-        'questions': questions,
-        'results': results,
-        'avg_scores': avg_scores,
-        'success': True
-    }
-
-# ============================================
-# PARALLEL EVALUATION
-# ============================================
-
-def run_parallel_evaluation(users: List[Dict], pinecone_index, embed_model, llm, max_workers: int = 3):
-    """Run evaluation for multiple users in parallel"""
-    results = []
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_user = {
-            executor.submit(evaluate_user_direct, user, pinecone_index, embed_model, llm): user
-            for user in users
-        }
-        
-        for future in concurrent.futures.as_completed(future_to_user):
-            user = future_to_user[future]
-            try:
-                result = future.result(timeout=600)
-                results.append(result)
-                print(f"✅ Completed evaluation for {user['email']}")
-            except Exception as e:
-                print(f"❌ Failed evaluation for {user['email']}: {e}")
-                results.append({
-                    'user_id': user['user_id'],
-                    'email': user['email'],
-                    'success': False,
-                    'error': str(e)
-                })
-    
-    return results
-
-# ============================================
-# MAIN EVALUATION WITH TRULENS
-# ============================================
-
-def run_evaluation_with_trulens(users: List[Dict], pinecone_index, embed_model, llm):
-    """Run evaluation with TruLens if available"""
-    if not TRULENS_AVAILABLE:
-        print("⚠️ TruLens not available. Running without TruLens.")
-        return None, None
-    
-    try:
-        session = TruSession(database_url="sqlite:///trulens.db")
-        print("✅ Connected to TruLens database")
-        
-        # Define feedback functions
-        f_relevance = Feedback(evaluate_relevance, name="Relevance").on_input_output()
-        f_quality = Feedback(evaluate_quality, name="Quality").on_input_output()
-        f_groundedness = Feedback(evaluate_groundedness, name="Groundedness").on_input_output()
-        f_context_relevance = Feedback(evaluate_context_relevance, name="Context Relevance").on_input_output()
-        f_correctness = Feedback(evaluate_correctness, name="Correctness").on_input_output()
-        
-        # Evaluate first user with TruLens
-        if users:
-            user = users[0]
-            rag = OptimizedRAG(pinecone_index, embed_model, llm, user_id=user['user_id'])
+    def query(self, question: str) -> str:
+        try:
+            query_embedding = self.embed_model._embed_text(question)
+            if not query_embedding:
+                return "No relevant documents found."
             
-            class RAGWrapper:
-                def respond(self, question: str) -> str:
-                    return rag.query(question)
+            filter_dict = {}
+            if self.user_id:
+                filter_dict["user_id"] = {"$eq": self.user_id}
             
-            rag_wrapper = RAGWrapper()
-            
-            tru_app = TruApp(
-                rag_wrapper,
-                app_name=APP_NAME,
-                app_version="v1.0",
-                feedbacks=[f_relevance, f_quality, f_groundedness, f_context_relevance, f_correctness],
-                main_method=rag_wrapper.respond
+            results = self.pinecone_index.query(
+                vector=query_embedding,
+                top_k=5,
+                include_metadata=True,
+                namespace="notes",
+                filter=filter_dict
             )
             
-            questions = generate_questions_from_notes(fetch_user_notes(pinecone_index, user['user_id']), 5)
+            contexts = []
+            for match in results.matches:
+                if match.metadata and 'text' in match.metadata:
+                    contexts.append(match.metadata['text'][:800])
             
-            print(f"📊 Running TruLens evaluation with {len(questions)} questions...")
+            if not contexts:
+                return "No relevant documents found for this user."
             
-            with tru_app as recording:
-                for q in questions:
-                    rag_wrapper.respond(q)
+            prompt = f"""Answer based on context.
+
+CONTEXT:
+{chr(10).join(contexts)}
+
+QUESTION:
+{question}
+
+ANSWER:"""
             
-            tru_app.wait_for_feedback_results()
-            print("✅ TruLens evaluation complete")
-            
-            return session, tru_app
+            response = self.llm.complete(prompt)
+            return str(response).strip()
+        except Exception as e:
+            return f"Error: {e}"
+
+# ============================================
+# BACKGROUND EVALUATOR
+# ============================================
+
+class BackgroundEvaluator:
+    def __init__(self):
+        self.db = EvalDatabase()
+        self.running = False
+        self.thread = None
+        self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+    def start(self, users: List[Dict], pinecone_index, embed_model, llm):
+        """Start background evaluation"""
+        if self.running:
+            print("⚠️ Evaluation already running")
+            return
+        
+        self.running = True
+        
+        # Initialize status
+        self.db.update_status({
+            'run_id': self.run_id,
+            'total_users': len(users),
+            'completed_users': 0,
+            'total_questions': 0,
+            'completed_questions': 0,
+            'current_user': '',
+            'status': 'running',
+            'message': 'Starting evaluation...'
+        })
+        
+        # Start background thread
+        self.thread = threading.Thread(
+            target=self._run_evaluation,
+            args=(users, pinecone_index, embed_model, llm)
+        )
+        self.thread.daemon = True
+        self.thread.start()
+        
+        print(f"✅ Background evaluation started (Run ID: {self.run_id})")
     
-    except Exception as e:
-        print(f"⚠️ TruLens error: {e}")
-        return None, None
+    def _run_evaluation(self, users: List[Dict], pinecone_index, embed_model, llm):
+        """Run evaluation in background"""
+        try:
+            total_questions = 0
+            
+            for user_idx, user in enumerate(users):
+                if not self.running:
+                    break
+                
+                user_id = user['user_id']
+                email = user['email']
+                
+                self.db.update_status({
+                    'run_id': self.run_id,
+                    'total_users': len(users),
+                    'completed_users': user_idx,
+                    'total_questions': total_questions,
+                    'completed_questions': len([q for q in range(total_questions)]),
+                    'current_user': email,
+                    'status': 'running',
+                    'message': f'Evaluating user: {email}'
+                })
+                
+                # Get user notes
+                notes = fetch_user_notes(pinecone_index, user_id)
+                
+                if not notes:
+                    continue
+                
+                # Generate questions
+                questions = generate_questions_from_notes(notes, num_questions=10)
+                
+                # Create RAG instance
+                rag = OptimizedRAG(pinecone_index, embed_model, llm, user_id=user_id)
+                
+                for q_idx, question in enumerate(questions):
+                    if not self.running:
+                        break
+                    
+                    # Get response
+                    response = rag.query(question)
+                    
+                    # Evaluate
+                    scores = {
+                        'relevance': evaluate_relevance(question, response),
+                        'quality': evaluate_quality(question, response),
+                        'groundedness': evaluate_groundedness(question, response),
+                        'context_relevance': evaluate_context_relevance(question, response),
+                        'correctness': evaluate_correctness(question, response)
+                    }
+                    
+                    # Save to database
+                    eval_data = {
+                        'run_id': self.run_id,
+                        'user_id': user_id,
+                        'email': email,
+                        'question': question,
+                        'response': response[:500],
+                        'timestamp': datetime.now().isoformat(),
+                        'status': 'completed',
+                        **scores
+                    }
+                    
+                    self.db.save_evaluation(eval_data)
+                    total_questions += 1
+                    
+                    # Update status
+                    self.db.update_status({
+                        'run_id': self.run_id,
+                        'total_users': len(users),
+                        'completed_users': user_idx + 1,
+                        'total_questions': total_questions,
+                        'completed_questions': total_questions,
+                        'current_user': email,
+                        'status': 'running',
+                        'message': f'Evaluated {total_questions} questions for {email}'
+                    })
+                
+                self.db.update_status({
+                    'run_id': self.run_id,
+                    'total_users': len(users),
+                    'completed_users': user_idx + 1,
+                    'total_questions': total_questions,
+                    'completed_questions': total_questions,
+                    'current_user': email,
+                    'status': 'running',
+                    'message': f'✅ Completed user: {email}'
+                })
+            
+            self.db.update_status({
+                'run_id': self.run_id,
+                'total_users': len(users),
+                'completed_users': len(users),
+                'total_questions': total_questions,
+                'completed_questions': total_questions,
+                'current_user': '',
+                'status': 'completed',
+                'message': f'✅ Evaluation complete! {total_questions} questions evaluated'
+            })
+            
+        except Exception as e:
+            self.db.update_status({
+                'run_id': self.run_id,
+                'total_users': len(users) if users else 0,
+                'completed_users': 0,
+                'total_questions': 0,
+                'completed_questions': 0,
+                'current_user': '',
+                'status': 'error',
+                'message': f'❌ Error: {str(e)}'
+            })
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.running = False
+    
+    def stop(self):
+        """Stop background evaluation"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=5)
+        print("⏹️ Evaluation stopped")
 
 # ============================================
-# MAIN EVALUATION
+# DASHBOARD
 # ============================================
 
-def run_evaluation():
-    """Run the complete evaluation for all users"""
+def create_dashboard_file():
+    """Create the dashboard Streamlit file"""
+    
+    dashboard_code = '''
+import streamlit as st
+import pandas as pd
+import sqlite3
+import time
+import os
+from datetime import datetime
+
+st.set_page_config(
+    page_title="Live RAG Evaluation Dashboard",
+    page_icon="📊",
+    layout="wide"
+)
+
+st.title("📊 Live RAG Evaluation Dashboard")
+
+# Database connection
+DB_PATH = "data/eval_results.db"
+
+def get_status():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query("SELECT * FROM eval_status ORDER BY id DESC LIMIT 1", conn)
+        conn.close()
+        return df.iloc[0] if not df.empty else None
+    except:
+        return None
+
+def get_summary():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query("""
+            SELECT 
+                COUNT(*) as total,
+                AVG(relevance) as avg_relevance,
+                AVG(quality) as avg_quality,
+                AVG(groundedness) as avg_groundedness,
+                AVG(context_relevance) as avg_context_relevance,
+                AVG(correctness) as avg_correctness
+            FROM evaluations
+        """, conn)
+        conn.close()
+        return df.iloc[0] if not df.empty else None
+    except:
+        return None
+
+def get_recent_results(limit=20):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query(
+            "SELECT * FROM evaluations ORDER BY timestamp DESC LIMIT ?",
+            conn, params=(limit,)
+        )
+        conn.close()
+        return df
+    except:
+        return pd.DataFrame()
+
+# Auto-refresh
+auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
+refresh_interval = st.sidebar.slider("Refresh interval (seconds)", 1, 10, 3)
+
+# Status
+status = get_status()
+
+if status is not None:
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("👥 Users", f"{status.get('completed_users', 0)}/{status.get('total_users', 0)}")
+    with col2:
+        st.metric("❓ Questions", status.get('completed_questions', 0))
+    with col3:
+        st.metric("⏳ Status", status.get('status', 'idle').upper())
+    with col4:
+        st.metric("📋 Current", status.get('current_user', 'Waiting...'))
+    
+    # Progress bar
+    if status.get('total_users', 0) > 0:
+        progress = status.get('completed_users', 0) / status.get('total_users', 0)
+        st.progress(progress, text=f"{progress*100:.1f}% - {status.get('message', '')}")
+else:
+    st.info("⏳ Waiting for evaluation to start...")
+
+# Summary
+summary = get_summary()
+if summary is not None:
+    st.markdown("---")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric("🎯 Relevance", f"{summary.get('avg_relevance', 0)*100:.1f}%")
+    with col2:
+        st.metric("⭐ Quality", f"{summary.get('avg_quality', 0)*100:.1f}%")
+    with col3:
+        st.metric("📚 Groundedness", f"{summary.get('avg_groundedness', 0)*100:.1f}%")
+    with col4:
+        st.metric("🔗 Context Relevance", f"{summary.get('avg_context_relevance', 0)*100:.1f}%")
+    with col5:
+        st.metric("✅ Correctness", f"{summary.get('avg_correctness', 0)*100:.1f}%")
+
+# Recent results
+st.markdown("---")
+st.subheader("📋 Recent Evaluations")
+
+df = get_recent_results()
+if not df.empty:
+    display_df = df[['timestamp', 'email', 'question', 'relevance', 'quality', 'correctness']].head(20)
+    display_df['timestamp'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%H:%M:%S')
+    display_df['relevance'] = display_df['relevance'] * 100
+    display_df['quality'] = display_df['quality'] * 100
+    display_df['correctness'] = display_df['correctness'] * 100
+    
+    st.dataframe(
+        display_df,
+        column_config={
+            'timestamp': 'Time',
+            'email': 'User',
+            'question': 'Question',
+            'relevance': st.column_config.NumberColumn('Relevance', format='%.1f%%'),
+            'quality': st.column_config.NumberColumn('Quality', format='%.1f%%'),
+            'correctness': st.column_config.NumberColumn('Correctness', format='%.1f%%')
+        },
+        use_container_width=True
+    )
+else:
+    st.info("📭 No evaluation data yet. Waiting for first results...")
+
+# Auto-refresh
+if auto_refresh:
+    time.sleep(refresh_interval)
+    st.rerun()
+'''
+
+    with open("dashboard.py", "w") as f:
+        f.write(dashboard_code)
+    print("✅ Dashboard file created")
+
+# ============================================
+# MAIN
+# ============================================
+
+def main():
+    """Main function - starts dashboard immediately and evaluation in background"""
     
     print("\n" + "="*60)
-    print("🚀 RAG EVALUATION FOR ALL USERS")
+    print("🚀 Starting Live RAG Evaluation System")
     print("="*60)
     
+    # Create dashboard file
+    create_dashboard_file()
+    
+    # Initialize Pinecone
     try:
         pc = Pinecone(api_key=PINECONE_API_KEY)
         pinecone_index = pc.Index(INDEX_NAME)
         print(f"✅ Connected to Pinecone index: {INDEX_NAME}")
     except Exception as e:
         print(f"❌ Failed to connect to Pinecone: {e}")
-        return None, None
+        return
     
+    # Fetch users
     users = fetch_all_users(pinecone_index)
     
     if not users:
         print("❌ No users found in Pinecone!")
-        return None, None
+        return
     
     print(f"\n👥 Found {len(users)} users:")
     for user in users:
         print(f"  - {user['email']} ({user['user_id']})")
     
+    # Initialize embedding and LLM
     try:
         embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
         llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
@@ -605,116 +887,34 @@ def run_evaluation():
         print("✅ Initialized embedding and LLM")
     except Exception as e:
         print(f"❌ Failed to initialize: {e}")
-        return None, None
+        return
     
-    # Run TruLens evaluation first
-    session, tru_app = run_evaluation_with_trulens(users, pinecone_index, embed_model, llm)
-    
-    print(f"\n📊 Running parallel evaluation with up to 3 users at a time...")
-    print("="*60)
-    
-    results = run_parallel_evaluation(users, pinecone_index, embed_model, llm, max_workers=3)
+    # Start background evaluation
+    evaluator = BackgroundEvaluator()
+    evaluator.start(users, pinecone_index, embed_model, llm)
     
     print("\n" + "="*60)
-    print("📊 EVALUATION SUMMARY")
+    print("📊 Starting Dashboard...")
     print("="*60)
+    print(f"Dashboard will be available at: http://localhost:{PORT}")
+    print("Results will update in real-time as evaluation runs!")
     
-    successful = [r for r in results if r.get('success', False)]
-    failed = [r for r in results if not r.get('success', False)]
-    
-    print(f"✅ Successful: {len(successful)}")
-    print(f"❌ Failed: {len(failed)}")
-    
-    all_results = []
-    for r in successful:
-        for q_result in r.get('results', []):
-            all_results.append({
-                'user_id': r['user_id'],
-                'email': r['email'],
-                'question': q_result['question'],
-                'response': q_result['response'],
-                'relevance': q_result['scores']['relevance'],
-                'quality': q_result['scores']['quality'],
-                'groundedness': q_result['scores']['groundedness'],
-                'context_relevance': q_result['scores']['context_relevance'],
-                'correctness': q_result['scores']['correctness']
-            })
-    
-    df = None
-    if all_results:
-        df = pd.DataFrame(all_results)
-        df.to_csv(f"evaluation_results_{RUN_ID}.csv", index=False)
-        print(f"💾 Results saved to: evaluation_results_{RUN_ID}.csv")
-        
-        print("\n📊 Average Scores Across All Users:")
-        print(f"  Relevance: {df['relevance'].mean()*100:.1f}%")
-        print(f"  Quality: {df['quality'].mean()*100:.1f}%")
-        print(f"  Groundedness: {df['groundedness'].mean()*100:.1f}%")
-        print(f"  Context Relevance: {df['context_relevance'].mean()*100:.1f}%")
-        print(f"  Correctness: {df['correctness'].mean()*100:.1f}%")
-    
-    return session, df
-
-# ============================================
-# DASHBOARD LAUNCHER
-# ============================================
-
-def launch_dashboard(session=None):
-    """Launch the dashboard"""
-    print("\n" + "="*60)
-    print("📊 Launching Dashboard...")
-    print("="*60)
-    
-    # Try TruLens dashboard first
-    if session and TRULENS_AVAILABLE:
-        try:
-            from trulens.dashboard import run_dashboard
-            
-            print(f"Starting TruLens dashboard on port {PORT}...")
-            run_dashboard(session=session, port=PORT)
-            return
-        except Exception as e:
-            print(f"⚠️ TruLens dashboard error: {e}")
-    
-    # Fallback: Streamlit dashboard
+    # Start Streamlit dashboard
     try:
-        import subprocess
-        import sys
-        
-        dashboard_file = "live_eval_dashboard.py"
-        
-        if os.path.exists(dashboard_file):
-            print(f"Starting Streamlit dashboard on port {PORT}...")
-            subprocess.run([
-                sys.executable, "-m", "streamlit", "run", dashboard_file,
-                "--server.port", str(PORT),
-                "--server.address", "0.0.0.0",
-                "--server.headless", "true"
-            ])
-        else:
-            print("❌ Dashboard file not found: live_eval_dashboard.py")
-            print("💡 You can view results in the CSV file.")
+        cmd = ["streamlit", "run", "dashboard.py", "--server.port", str(PORT), "--server.address", "0.0.0.0", "--server.headless", "true"]
+        subprocess.Popen(cmd)
     except Exception as e:
         print(f"⚠️ Dashboard error: {e}")
-        print("\n💡 You can view results using:")
-        print(f"  - CSV file: evaluation_results_{RUN_ID}.csv")
-        if session and TRULENS_AVAILABLE:
-            print("  - TruLens database: sqlite3 trulens.db")
-
-# ============================================
-# MAIN
-# ============================================
+    
+    # Keep process alive
+    print("\n⏳ System running. Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(60)
+    except KeyboardInterrupt:
+        print("\n⏹️ Stopping system...")
+        evaluator.stop()
+        sys.exit(0)
 
 if __name__ == "__main__":
-    # Run evaluation
-    session, df = run_evaluation()
-    
-    if session or df is not None:
-        print("\n" + "="*60)
-        print("📊 Launching Dashboard...")
-        print("="*60)
-        
-        # Launch dashboard
-        launch_dashboard(session)
-    else:
-        print("\n❌ Evaluation failed. Check the logs above.")
+    main()
