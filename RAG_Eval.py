@@ -1,12 +1,7 @@
 """
-RAG_Eval_All_Users_TruLens.py - Combined Version
-Multi-user RAG evaluation with TruLens dashboard and SQLite database
-Features:
-- Background evaluation for all users
-- TruLens dashboard with 5 metrics
-- TruLens SQLite database (trulens.db)
-- Real-time progress updates
-- Railway compatible
+RAG_Eval_All_Users_TruLens.py - Final Verified Version
+Uses TruLens default.sqlite database with proper connection
+Multi-user RAG evaluation with real-time dashboard
 """
 
 import os
@@ -14,18 +9,13 @@ import time
 import re
 import warnings
 import pandas as pd
-import json
-import hashlib
 from dotenv import load_dotenv
 from datetime import datetime
 from typing import List, Dict, Any
 import sys
-import concurrent.futures
 import threading
 import subprocess
-import queue
 import sqlite3
-from collections import deque
 
 warnings.filterwarnings('ignore')
 
@@ -71,12 +61,19 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports
-from trulens.core import TruSession, Feedback
-from trulens.apps.app import TruApp
+# TruLens imports - CORRECT WAY per documentation
+try:
+    from trulens.core import TruSession, Feedback
+    from trulens.apps.app import TruApp
+    TRULENS_AVAILABLE = True
+    print("✅ TruLens available")
+except ImportError as e:
+    TRULENS_AVAILABLE = False
+    print(f"⚠️ TruLens not available: {e}")
+    print("⚠️ Install with: pip install trulens-eval")
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
-APP_NAME = f"RAG_Eval_All_Users_{RUN_ID}"
+APP_NAME = f"RAG_Eval_{RUN_ID}"
 
 # ============================================
 # GEMINI EMBEDDING
@@ -320,7 +317,7 @@ class ModelRouter:
         return 0.5
 
 # ============================================
-# TRULENS FEEDBACK FUNCTIONS
+# FEEDBACK FUNCTIONS FOR TRULENS
 # ============================================
 
 router = None
@@ -356,6 +353,7 @@ class OptimizedRAG:
         self.embed_model = embed_model
         self.llm = llm
         self.user_id = user_id
+        self.last_context = ""
     
     def query(self, question: str) -> str:
         try:
@@ -383,6 +381,8 @@ class OptimizedRAG:
             if not contexts:
                 return "No relevant documents found for this user."
             
+            self.last_context = " ".join(contexts[:3])
+            
             prompt = f"""Answer based on context.
 
 CONTEXT:
@@ -399,33 +399,160 @@ ANSWER:"""
             return f"Error: {e}"
 
 # ============================================
-# BACKGROUND EVALUATOR WITH TRULENS
+# EVALUATOR WITH TRULENS DEFAULT.SQLITE
 # ============================================
 
-class BackgroundEvaluatorWithTruLens:
+class TruLensBackgroundEvaluator:
     def __init__(self):
         self.running = False
         self.thread = None
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.total_evaluations = 0
-        self.completed_evaluations = 0
         
-        # Connect to TruLens database
-        self.session = TruSession(database_url="sqlite:///trulens.db")
-        print("✅ TruLens database connection established.")
+        # Initialize TruLens session with default.sqlite
+        self.db_path = "default.sqlite"
+        self.session = None
+        self.tru_app = None
+        self.rag_wrapper = None
         
+        if TRULENS_AVAILABLE:
+            try:
+                # CORRECT WAY: Initialize TruSession with default.sqlite
+                self.session = TruSession(database_url="sqlite:///default.sqlite")
+                print(f"✅ TruLens session initialized with {self.db_path}")
+                print(f"📁 Database location: {os.path.abspath(self.db_path)}")
+            except Exception as e:
+                print(f"⚠️ TruLens session error: {e}")
+                self.session = None
+        
+        # Also create our custom tables for dashboard
+        self._init_custom_tables()
+    
+    def _init_custom_tables(self):
+        """Initialize custom tables for dashboard (separate from TruLens tables)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Our custom evaluations table for dashboard
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS evaluations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT,
+                    user_id TEXT,
+                    email TEXT,
+                    question TEXT,
+                    response TEXT,
+                    relevance REAL,
+                    quality REAL,
+                    groundedness REAL,
+                    context_relevance REAL,
+                    correctness REAL,
+                    timestamp TEXT,
+                    status TEXT DEFAULT 'pending'
+                )
+            """)
+            
+            # Status table for real-time updates
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS eval_status (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT,
+                    total_users INTEGER DEFAULT 0,
+                    completed_users INTEGER DEFAULT 0,
+                    total_questions INTEGER DEFAULT 0,
+                    completed_questions INTEGER DEFAULT 0,
+                    current_user TEXT,
+                    status TEXT DEFAULT 'idle',
+                    message TEXT,
+                    updated_at TEXT
+                )
+            """)
+            
+            conn.commit()
+            conn.close()
+            print("✅ Custom tables initialized for dashboard")
+        except Exception as e:
+            print(f"⚠️ Custom tables error: {e}")
+    
+    def save_evaluation(self, data: Dict):
+        """Save evaluation to custom tables"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT INTO evaluations (
+                    run_id, user_id, email, question, response,
+                    relevance, quality, groundedness, context_relevance, correctness,
+                    timestamp, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data.get('run_id'),
+                data.get('user_id'),
+                data.get('email'),
+                data.get('question'),
+                data.get('response'),
+                data.get('relevance', 0),
+                data.get('quality', 0),
+                data.get('groundedness', 0),
+                data.get('context_relevance', 0),
+                data.get('correctness', 0),
+                data.get('timestamp', datetime.now().isoformat()),
+                data.get('status', 'completed')
+            ))
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ Save evaluation error: {e}")
+    
+    def update_status(self, status: Dict):
+        """Update evaluation status"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO eval_status (
+                    id, run_id, total_users, completed_users,
+                    total_questions, completed_questions, current_user,
+                    status, message, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                status.get('run_id'),
+                status.get('total_users', 0),
+                status.get('completed_users', 0),
+                status.get('total_questions', 0),
+                status.get('completed_questions', 0),
+                status.get('current_user', ''),
+                status.get('status', 'idle'),
+                status.get('message', ''),
+                datetime.now().isoformat()
+            ))
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ Update status error: {e}")
+    
     def start(self, users: List[Dict], pinecone_index, embed_model, llm):
-        """Start background evaluation with TruLens"""
+        """Start background evaluation"""
         if self.running:
-            print("⚠️ Evaluation already running")
             return
         
         self.running = True
         self.users = users
-        self.total_evaluations = len(users) * 10  # 10 questions per user
         
-        print(f"\n📊 Total users: {len(users)}")
-        print(f"📊 Total evaluations: {self.total_evaluations}")
+        self.update_status({
+            'run_id': self.run_id,
+            'total_users': len(users),
+            'completed_users': 0,
+            'total_questions': 0,
+            'completed_questions': 0,
+            'current_user': '',
+            'status': 'running',
+            'message': 'Starting evaluation...'
+        })
         
         # Start background thread
         self.thread = threading.Thread(
@@ -438,9 +565,9 @@ class BackgroundEvaluatorWithTruLens:
         print(f"✅ Background evaluation started (Run ID: {self.run_id})")
     
     def _run_evaluation(self, users: List[Dict], pinecone_index, embed_model, llm):
-        """Run evaluation with TruLens in background"""
+        """Run evaluation in background"""
         try:
-            self.completed_evaluations = 0
+            total_questions = 0
             
             for user_idx, user in enumerate(users):
                 if not self.running:
@@ -451,11 +578,21 @@ class BackgroundEvaluatorWithTruLens:
                 
                 print(f"\n👤 Evaluating user {user_idx+1}/{len(users)}: {email}")
                 
+                self.update_status({
+                    'run_id': self.run_id,
+                    'total_users': len(users),
+                    'completed_users': user_idx,
+                    'total_questions': total_questions,
+                    'completed_questions': total_questions,
+                    'current_user': email,
+                    'status': 'running',
+                    'message': f'Evaluating user: {email}'
+                })
+                
                 # Get user notes
                 notes = fetch_user_notes(pinecone_index, user_id)
-                
                 if not notes:
-                    print(f"⚠️ No notes found for {email}, skipping...")
+                    print(f"⚠️ No notes found for {email}")
                     continue
                 
                 # Generate questions
@@ -473,7 +610,7 @@ class BackgroundEvaluatorWithTruLens:
                     def respond(self, question: str) -> str:
                         return self.rag.query(question)
                 
-                rag_wrapper = RAGWrapper(rag)
+                self.rag_wrapper = RAGWrapper(rag)
                 
                 # Setup TruLens feedback functions
                 f_relevance = Feedback(relevance, name="Relevance").on_input_output()
@@ -482,36 +619,138 @@ class BackgroundEvaluatorWithTruLens:
                 f_context_relevance = Feedback(context_relevance, name="Context Relevance").on_input_output()
                 f_correctness = Feedback(correctness, name="Correctness").on_input_output()
                 
-                # Create TruLens app for this user
-                tru_app = TruApp(
-                    rag_wrapper,
-                    app_name=f"{APP_NAME}_{email}",
-                    app_version="v1.0",
-                    feedbacks=[f_relevance, f_quality, f_groundedness, f_context_relevance, f_correctness],
-                    main_method=rag_wrapper.respond
-                )
-                
-                # Run evaluation with TruLens
-                print(f"🔄 Running {len(questions)} questions for {email}...")
-                
-                with tru_app as recording:
+                # Create TruLens app - CORRECT WAY per documentation
+                if TRULENS_AVAILABLE and self.session:
+                    self.tru_app = TruApp(
+                        self.rag_wrapper,
+                        app_name=f"{APP_NAME}_{email}",
+                        app_version="v1.0",
+                        feedbacks=[f_relevance, f_quality, f_groundedness, f_context_relevance, f_correctness],
+                        main_method=self.rag_wrapper.respond
+                    )
+                    
+                    # Run evaluation with TruLens
+                    print(f"🔄 Running {len(questions)} questions for {email}...")
+                    
+                    with self.tru_app as recording:
+                        for q_idx, question in enumerate(questions, 1):
+                            if not self.running:
+                                break
+                            
+                            print(f"  {q_idx}/{len(questions)}: {question[:50]}...")
+                            response = self.rag_wrapper.respond(question)
+                            
+                            # Save to custom tables for dashboard
+                            scores = {
+                                'relevance': relevance(question, response),
+                                'quality': quality(question, response),
+                                'groundedness': groundedness(question, response),
+                                'context_relevance': context_relevance(question, response),
+                                'correctness': correctness(question, response)
+                            }
+                            
+                            eval_data = {
+                                'run_id': self.run_id,
+                                'user_id': user_id,
+                                'email': email,
+                                'question': question,
+                                'response': response[:500],
+                                'timestamp': datetime.now().isoformat(),
+                                'status': 'completed',
+                                **scores
+                            }
+                            
+                            self.save_evaluation(eval_data)
+                            total_questions += 1
+                            
+                            self.update_status({
+                                'run_id': self.run_id,
+                                'total_users': len(users),
+                                'completed_users': user_idx + 1,
+                                'total_questions': total_questions,
+                                'completed_questions': total_questions,
+                                'current_user': email,
+                                'status': 'running',
+                                'message': f'Evaluated {total_questions} questions'
+                            })
+                    
+                    # Wait for TruLens feedback results
+                    print("⏳ Waiting for TruLens feedback...")
+                    time.sleep(5)
+                    
+                else:
+                    # Fallback without TruLens
+                    print("🔄 Running evaluation without TruLens...")
                     for q_idx, question in enumerate(questions, 1):
                         if not self.running:
                             break
                         
                         print(f"  {q_idx}/{len(questions)}: {question[:50]}...")
-                        rag_wrapper.respond(question)
-                        self.completed_evaluations += 1
+                        response = rag.query(question)
+                        
+                        scores = {
+                            'relevance': relevance(question, response),
+                            'quality': quality(question, response),
+                            'groundedness': groundedness(question, response),
+                            'context_relevance': context_relevance(question, response),
+                            'correctness': correctness(question, response)
+                        }
+                        
+                        eval_data = {
+                            'run_id': self.run_id,
+                            'user_id': user_id,
+                            'email': email,
+                            'question': question,
+                            'response': response[:500],
+                            'timestamp': datetime.now().isoformat(),
+                            'status': 'completed',
+                            **scores
+                        }
+                        
+                        self.save_evaluation(eval_data)
+                        total_questions += 1
+                        
+                        self.update_status({
+                            'run_id': self.run_id,
+                            'total_users': len(users),
+                            'completed_users': user_idx + 1,
+                            'total_questions': total_questions,
+                            'completed_questions': total_questions,
+                            'current_user': email,
+                            'status': 'running',
+                            'message': f'Evaluated {total_questions} questions'
+                        })
                 
                 print(f"✅ Completed evaluation for {email}")
             
+            # Final status
+            self.update_status({
+                'run_id': self.run_id,
+                'total_users': len(users),
+                'completed_users': len(users),
+                'total_questions': total_questions,
+                'completed_questions': total_questions,
+                'current_user': '',
+                'status': 'completed',
+                'message': f'✅ Evaluation complete! {total_questions} questions evaluated'
+            })
+            
             print("\n" + "="*60)
-            print("✅ All evaluations complete!")
-            print(f"📊 Total evaluations: {self.completed_evaluations}")
+            print(f"✅ All evaluations complete! {total_questions} total questions")
+            print(f"📁 Data saved to: {self.db_path}")
             print("="*60)
             
         except Exception as e:
-            print(f"❌ Error during evaluation: {e}")
+            self.update_status({
+                'run_id': self.run_id,
+                'total_users': len(users) if users else 0,
+                'completed_users': 0,
+                'total_questions': 0,
+                'completed_questions': 0,
+                'current_user': '',
+                'status': 'error',
+                'message': f'❌ Error: {str(e)}'
+            })
             import traceback
             traceback.print_exc()
         finally:
@@ -525,211 +764,161 @@ class BackgroundEvaluatorWithTruLens:
         print("⏹️ Evaluation stopped")
 
 # ============================================
-# LAUNCH TRULENS DASHBOARD
+# CREATE DASHBOARD
 # ============================================
 
-def launch_trulens_dashboard():
-    """Launch the TruLens dashboard"""
-    
-    print("\n" + "="*60)
-    print("📊 Launching TruLens Dashboard...")
-    print("="*60)
-    print(f"✅ Dashboard available at: http://localhost:{PORT}")
-    print(f"📁 Using TruLens database: trulens.db")
-    print("="*60)
-    
-    try:
-        # Try to use TruLens built-in dashboard
-        from trulens.dashboard import run_dashboard
-        
-        # Create session
-        session = TruSession(database_url="sqlite:///trulens.db")
-        print("Starting TruLens dashboard on port", PORT)
-        
-        # Run the dashboard
-        run_dashboard(session=session, port=PORT)
-        
-    except Exception as e:
-        print(f"⚠️ TruLens dashboard error: {e}")
-        print("Trying alternative method...")
-        
-        # Alternative: Use custom Streamlit dashboard
-        try:
-            create_trulens_standalone_dashboard()
-            
-            cmd = [
-                "streamlit", "run", "trulens_standalone_dashboard.py",
-                "--server.port", str(PORT),
-                "--server.address", "0.0.0.0",
-                "--server.headless", "true",
-                "--server.enableCORS", "false",
-                "--server.enableXsrfProtection", "false"
-            ]
-            subprocess.run(cmd)
-            
-        except Exception as e2:
-            print(f"❌ Alternative dashboard also failed: {e2}")
-            print("\n💡 Dashboard could not be started automatically.")
-            print("You can still access your results via:")
-            print("  - TruLens SQLite database: trulens.db")
-            print(f"  - Run: streamlit run trulens_standalone_dashboard.py --server.port {PORT}")
-
-# ============================================
-# STANDALONE TRULENS DASHBOARD
-# ============================================
-
-def create_trulens_standalone_dashboard():
-    """Create a standalone TruLens dashboard"""
+def create_dashboard_file():
+    """Create the Streamlit dashboard file"""
     
     dashboard_code = '''
-"""
-TruLens Standalone Dashboard - Shows all evaluations from trulens.db
-"""
-
 import streamlit as st
 import pandas as pd
 import sqlite3
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
 import time
+from datetime import datetime
 
 st.set_page_config(
-    page_title="TruLens RAG Evaluation Dashboard",
-    page_icon="🔍",
+    page_title="Live RAG Evaluation Dashboard",
+    page_icon="📊",
     layout="wide"
 )
 
-st.markdown("""
-    <style>
-    .main-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background: white;
-        border-radius: 10px;
-        padding: 1rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        border-left: 4px solid #667eea;
-        margin: 0.5rem 0;
-    }
-    .metric-value {
-        font-size: 1.8rem;
-        font-weight: 700;
-    }
-    .score-high { color: #4CAF50; }
-    .score-medium { color: #FF9800; }
-    .score-low { color: #f44336; }
-    </style>
-""", unsafe_allow_html=True)
+st.title("📊 Live RAG Evaluation Dashboard")
+st.caption(f"📁 Database: default.sqlite")
 
-st.markdown('<div class="main-header"><h1>🔍 TruLens RAG Evaluation Dashboard</h1></div>', unsafe_allow_html=True)
+DB_PATH = "default.sqlite"
 
-DB_PATH = "trulens.db"
-
-@st.cache_data(ttl=5)
-def get_data(query):
+def get_status():
     try:
         conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql_query(query, conn)
+        df = pd.read_sql_query("SELECT * FROM eval_status ORDER BY id DESC LIMIT 1", conn)
+        conn.close()
+        return df.iloc[0] if not df.empty else None
+    except:
+        return None
+
+def get_summary():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query("""
+            SELECT 
+                COUNT(*) as total,
+                AVG(relevance) as avg_relevance,
+                AVG(quality) as avg_quality,
+                AVG(groundedness) as avg_groundedness,
+                AVG(context_relevance) as avg_context_relevance,
+                AVG(correctness) as avg_correctness
+            FROM evaluations
+        """, conn)
+        conn.close()
+        return df.iloc[0] if not df.empty else None
+    except:
+        return None
+
+def get_recent_results(limit=20):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query(
+            "SELECT * FROM evaluations ORDER BY timestamp DESC LIMIT ?",
+            conn, params=(limit,)
+        )
         conn.close()
         return df
     except:
         return pd.DataFrame()
 
-# Get summary from TruLens database
-summary = get_data("""
-    SELECT 
-        COUNT(DISTINCT r.record_id) as total,
-        AVG(f.result) as avg_score,
-        f.name as metric_name
-    FROM records r
-    JOIN feedback f ON r.record_id = f.record_id
-    GROUP BY f.name
-""")
+auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
+refresh_interval = st.sidebar.slider("Refresh interval (seconds)", 1, 10, 3)
 
-if summary.empty:
-    st.warning("⚠️ No evaluation data found in trulens.db")
-    st.info("💡 Run the RAG evaluation first to generate data")
-    st.stop()
+status = get_status()
 
-# Display metrics
-st.subheader("📊 Evaluation Metrics")
+if status is not None:
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("👥 Users", f"{status.get('completed_users', 0)}/{status.get('total_users', 0)}")
+    with col2:
+        st.metric("❓ Questions", status.get('completed_questions', 0))
+    with col3:
+        st.metric("⏳ Status", status.get('status', 'idle').upper())
+    with col4:
+        st.metric("📋 Current", status.get('current_user', 'Waiting...'))
+    
+    if status.get('total_users', 0) > 0:
+        progress = status.get('completed_users', 0) / status.get('total_users', 0)
+        st.progress(progress, text=f"{progress*100:.1f}% - {status.get('message', '')}")
+else:
+    st.info("⏳ Waiting for evaluation to start...")
 
-cols = st.columns(5)
-metrics = {
-    "Relevance": 0,
-    "Quality": 0,
-    "Groundedness": 0,
-    "Context Relevance": 0,
-    "Correctness": 0
-}
-
-for _, row in summary.iterrows():
-    if row['metric_name'] in metrics:
-        metrics[row['metric_name']] = row['avg_score']
-
-for idx, (name, value) in enumerate(metrics.items()):
-    with cols[idx]:
-        color = "score-high" if value > 0.7 else "score-medium" if value > 0.4 else "score-low"
-        st.markdown(f"""
-            <div class="metric-card">
-                <div style="font-size:0.8rem;color:#666;">{name}</div>
-                <div class="metric-value {color}">{value*100:.1f}%</div>
-            </div>
-        """, unsafe_allow_html=True)
-
-# Get recent evaluations
-recent = get_data("""
-    SELECT 
-        r.timestamp, 
-        r.input as question,
-        f.name as metric,
-        f.result as score
-    FROM records r
-    JOIN feedback f ON r.record_id = f.record_id
-    ORDER BY r.timestamp DESC
-    LIMIT 50
-""")
-
-if not recent.empty:
+summary = get_summary()
+if summary is not None and summary.get('total', 0) > 0:
     st.markdown("---")
-    st.subheader("📋 Recent Evaluations")
+    col1, col2, col3, col4, col5 = st.columns(5)
     
-    # Pivot for display
-    pivot_df = recent.pivot_table(
-        index=['timestamp', 'question'],
-        columns='metric',
-        values='score'
-    ).reset_index()
-    
-    st.dataframe(pivot_df, use_container_width=True)
+    with col1:
+        st.metric("🎯 Relevance", f"{summary.get('avg_relevance', 0)*100:.1f}%")
+    with col2:
+        st.metric("⭐ Quality", f"{summary.get('avg_quality', 0)*100:.1f}%")
+    with col3:
+        st.metric("📚 Groundedness", f"{summary.get('avg_groundedness', 0)*100:.1f}%")
+    with col4:
+        st.metric("🔗 Context Relevance", f"{summary.get('avg_context_relevance', 0)*100:.1f}%")
+    with col5:
+        st.metric("✅ Correctness", f"{summary.get('avg_correctness', 0)*100:.1f}%")
+else:
+    st.info("📊 No evaluation data yet. Waiting for results...")
 
-# Auto-refresh
-if st.sidebar.checkbox("Auto-refresh", value=True):
-    time.sleep(5)
+st.markdown("---")
+st.subheader("📋 Recent Evaluations")
+
+df = get_recent_results()
+if not df.empty:
+    display_df = df[['timestamp', 'email', 'question', 'relevance', 'quality', 'correctness']].head(20)
+    display_df['timestamp'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%H:%M:%S')
+    display_df['relevance'] = display_df['relevance'] * 100
+    display_df['quality'] = display_df['quality'] * 100
+    display_df['correctness'] = display_df['correctness'] * 100
+    
+    st.dataframe(
+        display_df,
+        column_config={
+            'timestamp': 'Time',
+            'email': 'User',
+            'question': 'Question',
+            'relevance': st.column_config.NumberColumn('Relevance', format='%.1f%%'),
+            'quality': st.column_config.NumberColumn('Quality', format='%.1f%%'),
+            'correctness': st.column_config.NumberColumn('Correctness', format='%.1f%%')
+        },
+        use_container_width=True
+    )
+else:
+    st.info("📭 No evaluation data yet. Waiting for first results...")
+
+if auto_refresh:
+    time.sleep(refresh_interval)
     st.rerun()
 '''
 
-    with open("trulens_standalone_dashboard.py", "w") as f:
+    with open("dashboard.py", "w") as f:
         f.write(dashboard_code)
-    print("✅ TruLens standalone dashboard created")
+    print("✅ Dashboard file created")
 
 # ============================================
 # MAIN
 # ============================================
 
 def main():
-    """Main function - starts TruLens dashboard and background evaluation"""
+    """Main function - runs evaluation and dashboard"""
     
     print("\n" + "="*60)
-    print("🚀 Starting TruLens RAG Evaluation System")
+    print("🚀 Starting RAG Evaluation System")
     print("="*60)
+    print(f"📁 Database: default.sqlite")
+    print(f"📍 Location: {os.path.abspath('default.sqlite')}")
+    print("="*60)
+    
+    # Create dashboard file
+    create_dashboard_file()
     
     # Initialize Pinecone
     try:
@@ -748,7 +937,7 @@ def main():
         return
     
     print(f"\n👥 Found {len(users)} users:")
-    for user in users[:5]:  # Show first 5
+    for user in users[:5]:
         print(f"  - {user['email']} ({user['user_id']})")
     if len(users) > 5:
         print(f"  ... and {len(users) - 5} more")
@@ -765,19 +954,39 @@ def main():
         return
     
     # Start background evaluation
-    evaluator = BackgroundEvaluatorWithTruLens()
+    evaluator = TruLensBackgroundEvaluator()
     evaluator.start(users, pinecone_index, embed_model, llm)
     
     print("\n" + "="*60)
-    print("📊 Launching TruLens Dashboard...")
+    print("📊 Starting Dashboard...")
     print("="*60)
-    print(f"✅ Dashboard will be available at: http://localhost:{PORT}")
+    print(f"✅ Dashboard available at: http://localhost:{PORT}")
+    print(f"📁 Database: default.sqlite")
     print("🔄 Evaluation is running in the background!")
-    print("📈 Results will update in real-time as evaluation progresses")
+    print("📈 Results will update in real-time")
     print("="*60)
     
-    # Launch TruLens dashboard
-    launch_trulens_dashboard()
+    # Start Streamlit dashboard
+    try:
+        cmd = [
+            "streamlit", "run", "dashboard.py",
+            "--server.port", str(PORT),
+            "--server.address", "0.0.0.0",
+            "--server.headless", "true",
+            "--server.enableCORS", "false",
+            "--server.enableXsrfProtection", "false"
+        ]
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        print("\n⏹️ Stopping system...")
+        sys.exit(0)
+    except Exception as e:
+        print(f"⚠️ Dashboard error: {e}")
+        try:
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            sys.exit(0)
 
 if __name__ == "__main__":
     main()
