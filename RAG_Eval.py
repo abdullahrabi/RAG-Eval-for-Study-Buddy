@@ -1,3 +1,11 @@
+"""
+RAG_Eval_All_Users_TruLens.py - FINAL COMPLETE VERSION
+Multi-user RAG evaluation with TruLens native dashboard ONLY
+Runs evaluation completely then launches TruLens dashboard
+No background threads - synchronous execution
+All features from original RAG_Eval_All_Users.py preserved
+"""
+
 import os
 import time
 import re
@@ -10,8 +18,8 @@ from datetime import datetime
 from typing import List, Dict, Any
 import sys
 import sqlite3
-import subprocess
 import random
+import subprocess
 
 warnings.filterwarnings('ignore')
 
@@ -539,11 +547,11 @@ class EvalDatabase:
         }
 
 # ============================================
-# RUN EVALUATION - SYNCHRONOUS WITH TRULENS
+# RUN EVALUATION - COMPLETE BEFORE DASHBOARD
 # ============================================
 
 def run_evaluation(users, pinecone_index, embed_model, llm):
-    """Run evaluation synchronously with TruLens"""
+    """Run complete evaluation before launching dashboard"""
     
     print("\n" + "="*60)
     print("📊 Running RAG Evaluation with TruLens...")
@@ -691,7 +699,7 @@ def run_evaluation(users, pinecone_index, embed_model, llm):
     print(f"📁 Data saved to: default.sqlite")
     print("="*60)
     
-    return session
+    return session, total_questions
 
 # ============================================
 # MAIN
@@ -741,22 +749,31 @@ def main():
         print(f"❌ Failed to initialize: {e}")
         return
     
-    # Run evaluation
-    session = run_evaluation(users, pinecone_index, embed_model, llm)
+    # Run evaluation - COMPLETELY before dashboard
+    session, total_questions = run_evaluation(users, pinecone_index, embed_model, llm)
     
-    if not session:
-        print("❌ Evaluation failed!")
+    if not session or total_questions == 0:
+        print("❌ Evaluation failed or no questions evaluated!")
         return
     
     print("\n" + "="*60)
     print(f"📊 Launching TruLens Dashboard on port {PORT}...")
     print("="*60)
     print(f"✅ TruLens Dashboard available at: http://localhost:{PORT}")
-    print("📁 Data in: default.sqlite")
+    print(f"📁 Data in: default.sqlite")
+    print(f"📊 {total_questions} questions evaluated across {len(users)} users")
     print("="*60)
     
-    # Launch TruLens dashboard - THIS IS THE ONLY DASHBOARD
-    run_dashboard(session=session, port=PORT)
+    # Launch TruLens dashboard - THIS BLOCKS
+    try:
+        run_dashboard(session=session, port=PORT)
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down...")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ Dashboard error: {e}")
+        print("💡 Data is still saved in default.sqlite")
+        sys.exit(1)
 
 if __name__ == "__main__":
     try:
@@ -764,6 +781,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n👋 Shutting down...")
         sys.exit(0)
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        sys.exit(1)
