@@ -1,4 +1,4 @@
-# RAG_Eval_All_Users.py - Live Dashboard with Background Evaluation (Railway Compatible)
+# RAG_Eval_All_Users.py - Fixed Version
 import os
 import time
 import re
@@ -845,18 +845,14 @@ if auto_refresh:
     print("✅ Dashboard file created")
 
 # ============================================
-# MAIN
+# MAIN - FIXED: Dashboard starts FIRST
 # ============================================
 
-def main():
-    """Main function - starts dashboard immediately and evaluation in background"""
-    
+def run_evaluation_in_background():
+    """Run the evaluation in a background thread"""
     print("\n" + "="*60)
-    print("🚀 Starting Live RAG Evaluation System")
+    print("🔄 Starting Background Evaluation")
     print("="*60)
-    
-    # Create dashboard file
-    create_dashboard_file()
     
     # Initialize Pinecone
     try:
@@ -893,28 +889,61 @@ def main():
     evaluator = BackgroundEvaluator()
     evaluator.start(users, pinecone_index, embed_model, llm)
     
+    # Keep evaluator running
+    while evaluator.running:
+        time.sleep(5)
+
+def main():
+    """Main function - starts dashboard IMMEDIATELY, evaluation in background"""
+    
     print("\n" + "="*60)
-    print("📊 Starting Dashboard...")
+    print("🚀 Starting Live RAG Evaluation System")
     print("="*60)
-    print(f"Dashboard will be available at: http://localhost:{PORT}")
-    print("Results will update in real-time as evaluation runs!")
     
-    # Start Streamlit dashboard
-    try:
-        cmd = ["streamlit", "run", "dashboard.py", "--server.port", str(PORT), "--server.address", "0.0.0.0", "--server.headless", "true"]
-        subprocess.Popen(cmd)
-    except Exception as e:
-        print(f"⚠️ Dashboard error: {e}")
+    # Create dashboard file
+    create_dashboard_file()
     
-    # Keep process alive
-    print("\n⏳ System running. Press Ctrl+C to stop.")
+    # Start evaluation in background thread
+    eval_thread = threading.Thread(target=run_evaluation_in_background, daemon=True)
+    eval_thread.start()
+    print("✅ Background evaluator thread started")
+    
+    # Give evaluator a moment to initialize
+    time.sleep(2)
+    
+    print("\n" + "="*60)
+    print("📊 Starting Dashboard NOW...")
+    print("="*60)
+    print(f"✅ Dashboard available at: http://localhost:{PORT}")
+    print("🔄 Evaluation is running in the background!")
+    print("📈 Results will update in real-time as evaluation progresses")
+    print("="*60)
+    
+    # Start Streamlit dashboard - THIS RUNS NOW, NOT AFTER EVALUATION
     try:
-        while True:
-            time.sleep(60)
+        cmd = [
+            "streamlit", "run", "dashboard.py", 
+            "--server.port", str(PORT), 
+            "--server.address", "0.0.0.0", 
+            "--server.headless", "true",
+            "--server.enableCORS", "false",
+            "--server.enableXsrfProtection", "false"
+        ]
+        
+        # Run Streamlit - this blocks and keeps the process alive
+        subprocess.run(cmd)
+        
     except KeyboardInterrupt:
         print("\n⏹️ Stopping system...")
-        evaluator.stop()
         sys.exit(0)
+    except Exception as e:
+        print(f"⚠️ Dashboard error: {e}")
+        # Keep process alive even if dashboard fails
+        try:
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            sys.exit(0)
 
 if __name__ == "__main__":
     main()
