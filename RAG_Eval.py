@@ -1,7 +1,6 @@
 """
-RAG_Eval_All_Users_TruLens.py - Final Verified Version
-Uses TruLens default.sqlite database with proper connection
-Multi-user RAG evaluation with real-time dashboard
+RAG_Eval_All_Users_TruLens.py - Fixed Version
+Uses TruLens default.sqlite database with proper feedback serialization
 """
 
 import os
@@ -61,7 +60,7 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports - CORRECT WAY per documentation
+# TruLens imports
 try:
     from trulens.core import TruSession, Feedback
     from trulens.apps.app import TruApp
@@ -70,7 +69,6 @@ try:
 except ImportError as e:
     TRULENS_AVAILABLE = False
     print(f"⚠️ TruLens not available: {e}")
-    print("⚠️ Install with: pip install trulens-eval")
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 APP_NAME = f"RAG_Eval_{RUN_ID}"
@@ -128,6 +126,90 @@ class GeminiDirectEmbedding(BaseEmbedding):
     @classmethod
     def class_name(cls) -> str:
         return "GeminiDirectEmbedding"
+
+# ============================================
+# MODEL ROUTER FOR FEEDBACK
+# ============================================
+
+class ModelRouter:
+    def __init__(self, api_key: str):
+        from groq import Groq as GroqClient
+        self.client = GroqClient(api_key=api_key)
+    
+    def call_model(self, prompt: str, model: str) -> float:
+        for attempt in range(3):
+            try:
+                response = self.client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "Output ONLY a number between 0 and 1."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0,
+                    max_tokens=10
+                )
+                text = response.choices[0].message.content.strip()
+                nums = re.findall(r'(\d+\.?\d*)', text)
+                if nums:
+                    score = float(nums[0])
+                    if score > 1 and score <= 100:
+                        score = score / 100
+                    return max(0.0, min(1.0, score))
+                time.sleep(2)
+            except Exception:
+                time.sleep(5)
+        return 0.5
+
+# Global router
+_router = None
+
+def get_router():
+    global _router
+    if _router is None:
+        _router = ModelRouter(GROQ_API_KEY)
+    return _router
+
+# ============================================
+# FEEDBACK FUNCTIONS - WRAPPED IN A CLASS
+# ============================================
+
+class FeedbackFunctions:
+    """
+    Container class for feedback functions.
+    This avoids serialization issues with TruLens.
+    """
+    
+    @staticmethod
+    def relevance(input: str, output: str) -> float:
+        router = get_router()
+        return router.call_model(f"Score relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
+    
+    @staticmethod
+    def quality(input: str, output: str) -> float:
+        router = get_router()
+        return router.call_model(f"Score quality 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
+    
+    @staticmethod
+    def groundedness(input: str, output: str) -> float:
+        router = get_router()
+        return router.call_model(f"Score groundedness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
+    
+    @staticmethod
+    def context_relevance(input: str, output: str) -> float:
+        router = get_router()
+        return router.call_model(f"Score context relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
+    
+    @staticmethod
+    def correctness(input: str, output: str) -> float:
+        router = get_router()
+        return router.call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
+
+# Alias for convenience
+relevance = FeedbackFunctions.relevance
+quality = FeedbackFunctions.quality
+groundedness = FeedbackFunctions.groundedness
+context_relevance = FeedbackFunctions.context_relevance
+correctness = FeedbackFunctions.correctness
 
 # ============================================
 # FETCH ALL USERS FROM PINECONE
@@ -284,66 +366,6 @@ def generate_fallback_questions(text: str, num_questions: int = 10) -> List[str]
     return questions
 
 # ============================================
-# MODEL ROUTER FOR FEEDBACK
-# ============================================
-
-class ModelRouter:
-    def __init__(self, api_key: str):
-        from groq import Groq as GroqClient
-        self.client = GroqClient(api_key=api_key)
-    
-    def call_model(self, prompt: str, model: str) -> float:
-        for attempt in range(3):
-            try:
-                response = self.client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "Output ONLY a number between 0 and 1."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0,
-                    max_tokens=10
-                )
-                text = response.choices[0].message.content.strip()
-                nums = re.findall(r'(\d+\.?\d*)', text)
-                if nums:
-                    score = float(nums[0])
-                    if score > 1 and score <= 100:
-                        score = score / 100
-                    return max(0.0, min(1.0, score))
-                time.sleep(2)
-            except Exception:
-                time.sleep(5)
-        return 0.5
-
-# ============================================
-# FEEDBACK FUNCTIONS FOR TRULENS
-# ============================================
-
-router = None
-
-def get_router():
-    global router
-    if router is None:
-        router = ModelRouter(GROQ_API_KEY)
-    return router
-
-def relevance(input: str, output: str) -> float:
-    return get_router().call_model(f"Score relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
-
-def quality(input: str, output: str) -> float:
-    return get_router().call_model(f"Score quality 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
-
-def groundedness(input: str, output: str) -> float:
-    return get_router().call_model(f"Score groundedness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
-
-def context_relevance(input: str, output: str) -> float:
-    return get_router().call_model(f"Score context relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
-
-def correctness(input: str, output: str) -> float:
-    return get_router().call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
-
-# ============================================
 # OPTIMIZED RAG SYSTEM
 # ============================================
 
@@ -416,7 +438,7 @@ class TruLensBackgroundEvaluator:
         
         if TRULENS_AVAILABLE:
             try:
-                # CORRECT WAY: Initialize TruSession with default.sqlite
+                # Initialize TruSession with default.sqlite
                 self.session = TruSession(database_url="sqlite:///default.sqlite")
                 print(f"✅ TruLens session initialized with {self.db_path}")
                 print(f"📁 Database location: {os.path.abspath(self.db_path)}")
@@ -424,16 +446,16 @@ class TruLensBackgroundEvaluator:
                 print(f"⚠️ TruLens session error: {e}")
                 self.session = None
         
-        # Also create our custom tables for dashboard
+        # Create custom tables for dashboard
         self._init_custom_tables()
     
     def _init_custom_tables(self):
-        """Initialize custom tables for dashboard (separate from TruLens tables)"""
+        """Initialize custom tables for dashboard"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Our custom evaluations table for dashboard
+            # Custom evaluations table for dashboard
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS evaluations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -612,15 +634,16 @@ class TruLensBackgroundEvaluator:
                 
                 self.rag_wrapper = RAGWrapper(rag)
                 
-                # Setup TruLens feedback functions
-                f_relevance = Feedback(relevance, name="Relevance").on_input_output()
-                f_quality = Feedback(quality, name="Quality").on_input_output()
-                f_groundedness = Feedback(groundedness, name="Groundedness").on_input_output()
-                f_context_relevance = Feedback(context_relevance, name="Context Relevance").on_input_output()
-                f_correctness = Feedback(correctness, name="Correctness").on_input_output()
-                
-                # Create TruLens app - CORRECT WAY per documentation
+                # Setup TruLens feedback functions - using class methods to avoid serialization issues
                 if TRULENS_AVAILABLE and self.session:
+                    # Use FeedbackFunctions class methods directly
+                    f_relevance = Feedback(FeedbackFunctions.relevance, name="Relevance").on_input_output()
+                    f_quality = Feedback(FeedbackFunctions.quality, name="Quality").on_input_output()
+                    f_groundedness = Feedback(FeedbackFunctions.groundedness, name="Groundedness").on_input_output()
+                    f_context_relevance = Feedback(FeedbackFunctions.context_relevance, name="Context Relevance").on_input_output()
+                    f_correctness = Feedback(FeedbackFunctions.correctness, name="Correctness").on_input_output()
+                    
+                    # Create TruLens app
                     self.tru_app = TruApp(
                         self.rag_wrapper,
                         app_name=f"{APP_NAME}_{email}",
@@ -674,7 +697,7 @@ class TruLensBackgroundEvaluator:
                                 'message': f'Evaluated {total_questions} questions'
                             })
                     
-                    # Wait for TruLens feedback results
+                    # Wait for TruLens feedback
                     print("⏳ Waiting for TruLens feedback...")
                     time.sleep(5)
                     
