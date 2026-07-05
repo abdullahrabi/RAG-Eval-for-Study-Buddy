@@ -1,9 +1,10 @@
 """
 RAG_Eval_All_Users_TruLens.py - FINAL COMPLETE VERSION
-Multi-user RAG evaluation with TruLens native dashboard ONLY
-Runs evaluation completely then launches TruLens dashboard
-No background threads - synchronous execution
-All features from original RAG_Eval_All_Users.py preserved
+Multi-user RAG evaluation with TruLens native dashboard
+25+ AI-generated questions per user from notes ONLY
+NO fallback questions - strictly AI-generated
+Complete logging of each question and metric
+Dashboard opens only after ALL evaluations complete
 """
 
 import os
@@ -65,7 +66,7 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports - REQUIRED
+# TruLens imports
 try:
     from trulens.core import TruSession, Feedback
     from trulens.apps.app import TruApp
@@ -211,11 +212,16 @@ def fetch_user_notes(pinecone_index, user_id: str) -> List[Dict]:
         return []
 
 # ============================================
-# GENERATE QUESTIONS FROM NOTES
+# GENERATE QUESTIONS FROM NOTES - NO FALLBACK
 # ============================================
 
-def generate_questions_from_notes(notes: List[Dict], num_questions: int = 10) -> List[str]:
+def generate_questions_from_notes(notes: List[Dict], num_questions: int = 25) -> List[str]:
+    """
+    Generate questions from notes using AI.
+    NO FALLBACK QUESTIONS - strictly AI-generated.
+    """
     if not notes:
+        print("❌ No notes found - cannot generate questions!")
         return []
     
     full_text = " ".join([note['text'] for note in notes])
@@ -225,67 +231,111 @@ def generate_questions_from_notes(notes: List[Dict], num_questions: int = 10) ->
         
         client = GroqClient(api_key=GROQ_API_KEY)
         
+        # Truncate if too long
         if len(full_text) > 8000:
             full_text = full_text[:8000]
         
-        prompt = f"""Based on the following educational content, generate {num_questions} thoughtful questions.
+        prompt = f"""Based on the following educational content, generate {num_questions} diverse and thoughtful questions.
 
 CONTENT:
 {full_text}
 
-Generate exactly {num_questions} questions as a numbered list:"""
+Generate exactly {num_questions} questions covering different aspects of the content.
+Questions should be:
+- Diverse in difficulty (basic to advanced)
+- Cover different topics from the content
+- Include conceptual, analytical, and application-based questions
+- Be clear and well-phrased
+
+Output ONLY the questions as a numbered list (1 to {num_questions}):"""
 
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "Generate exactly the number of questions requested. Output only the numbered questions."},
+                {"role": "system", "content": f"Generate exactly {num_questions} questions based on the provided content. Output only the numbered questions."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.7,
-            max_tokens=1000
+            temperature=0.8,
+            max_tokens=1500
         )
         
         questions_text = response.choices[0].message.content.strip()
+        print(f"📝 AI Generated Questions Preview:\n{questions_text[:300]}...")
         
+        # Parse questions
+        questions = []
+        for line in questions_text.split('\n'):
+            line = line.strip()
+            # Match numbered questions: 1. Question, 1) Question, etc.
+            match = re.match(r'^(\d+)[\.\)]?\s*(.*)', line)
+            if match:
+                question_text = match.group(2).strip()
+                if question_text and len(question_text) > 10:
+                    questions.append(question_text)
+            elif line and len(line) > 15 and '?' in line:
+                # If no number but has question mark
+                questions.append(line)
+        
+        # Verify we have enough questions
+        if len(questions) < num_questions:
+            print(f"⚠️ Only {len(questions)} questions generated, attempting to generate more...")
+            # Try one more time with a different prompt
+            more_questions = generate_more_questions(full_text, num_questions - len(questions))
+            questions.extend(more_questions)
+        
+        # Strictly limit to requested number, but only if we have them
+        if len(questions) >= num_questions:
+            questions = questions[:num_questions]
+            print(f"✅ Successfully generated {len(questions)} questions")
+            return questions
+        else:
+            print(f"❌ Failed to generate {num_questions} questions. Only got {len(questions)}")
+            return questions  # Return whatever we got, even if less than requested
+            
+    except Exception as e:
+        print(f"❌ Error generating questions: {e}")
+        return []  # Return empty list - NO FALLBACK QUESTIONS
+
+def generate_more_questions(text: str, num_needed: int) -> List[str]:
+    """Generate additional questions if initial generation was insufficient"""
+    try:
+        from groq import Groq as GroqClient
+        
+        client = GroqClient(api_key=GROQ_API_KEY)
+        
+        prompt = f"""Based on this content, generate {num_needed} more diverse questions:
+
+CONTENT:
+{text[:3000]}
+
+Generate {num_needed} additional questions covering different aspects of the content.
+Output ONLY the questions as a numbered list:"""
+
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": f"Generate {num_needed} additional questions. Output only the numbered questions."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8,
+            max_tokens=800
+        )
+        
+        questions_text = response.choices[0].message.content.strip()
         questions = []
         for line in questions_text.split('\n'):
             line = line.strip()
             match = re.match(r'^(\d+)[\.\)]?\s*(.*)', line)
             if match:
                 question_text = match.group(2).strip()
-                if question_text:
+                if question_text and len(question_text) > 10:
                     questions.append(question_text)
-            elif line and len(line) > 10 and '?' in line:
-                questions.append(line)
         
-        if len(questions) < num_questions:
-            questions = generate_fallback_questions(full_text, num_questions)
-        
-        return questions[:num_questions]
-        
+        print(f"✅ Generated {len(questions)} additional questions")
+        return questions
     except Exception as e:
-        print(f"⚠️ Error generating questions: {e}")
-        return generate_fallback_questions(full_text, num_questions)
-
-def generate_fallback_questions(text: str, num_questions: int = 10) -> List[str]:
-    default_questions = [
-        "What is automata theory?",
-        "What is a finite automaton?",
-        "What are the applications of finite automata?",
-        "What is a formal language?",
-        "What is the difference between a string and a language?",
-        "What is the Kleene star operator?",
-        "What is the role of Turing machines?",
-        "What is the significance of the pumping lemma?",
-        "What are regular expressions?",
-        "What is the relationship between finite automata and regular languages?"
-    ]
-    
-    questions = default_questions[:num_questions]
-    while len(questions) < num_questions:
-        questions.append(default_questions[len(questions) % len(default_questions)])
-    
-    return questions
+        print(f"⚠️ Error generating more questions: {e}")
+        return []  # NO FALLBACK - return empty list
 
 # ============================================
 # MODEL ROUTER FOR FEEDBACK
@@ -352,13 +402,6 @@ def feedback_context_relevance(input: str, output: str) -> float:
 def feedback_correctness(input: str, output: str) -> float:
     router = get_router()
     return router.call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
-
-# Alias for convenience
-relevance = feedback_relevance
-quality = feedback_quality
-groundedness = feedback_groundedness
-context_relevance = feedback_context_relevance
-correctness = feedback_correctness
 
 # ============================================
 # OPTIMIZED RAG SYSTEM
@@ -519,32 +562,6 @@ class EvalDatabase:
         
         conn.commit()
         conn.close()
-    
-    def get_summary(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT 
-                COUNT(*) as total,
-                AVG(relevance) as avg_relevance,
-                AVG(quality) as avg_quality,
-                AVG(groundedness) as avg_groundedness,
-                AVG(context_relevance) as avg_context_relevance,
-                AVG(correctness) as avg_correctness
-            FROM evaluations
-        """)
-        row = cursor.fetchone()
-        conn.close()
-        
-        return {
-            'total': row[0] or 0,
-            'avg_relevance': row[1] or 0,
-            'avg_quality': row[2] or 0,
-            'avg_groundedness': row[3] or 0,
-            'avg_context_relevance': row[4] or 0,
-            'avg_correctness': row[5] or 0
-        }
 
 # ============================================
 # RUN EVALUATION - COMPLETE BEFORE DASHBOARD
@@ -577,12 +594,15 @@ def run_evaluation(users, pinecone_index, embed_model, llm):
     })
     
     total_questions = 0
+    all_tru_apps = []
     
     for user_idx, user in enumerate(users):
         user_id = user['user_id']
         email = user['email']
         
-        print(f"\n👤 Evaluating user {user_idx+1}/{len(users)}: {email}")
+        print(f"\n{'='*60}")
+        print(f"👤 Evaluating user {user_idx+1}/{len(users)}: {email}")
+        print(f"{'='*60}")
         
         db.update_status({
             'run_id': RUN_ID,
@@ -596,14 +616,23 @@ def run_evaluation(users, pinecone_index, embed_model, llm):
         })
         
         # Get user notes
+        print(f"📚 Fetching notes for {email}...")
         notes = fetch_user_notes(pinecone_index, user_id)
         if not notes:
-            print(f"⚠️ No notes found for {email}")
+            print(f"❌ No notes found for {email}, skipping user...")
             continue
         
-        # Generate questions
-        questions = generate_questions_from_notes(notes, num_questions=10)
-        print(f"📝 Generated {len(questions)} questions")
+        print(f"✅ Found {len(notes)} notes")
+        
+        # Generate questions from notes - NO FALLBACK
+        print(f"🤖 Generating 25 questions from notes using AI...")
+        questions = generate_questions_from_notes(notes, num_questions=25)
+        
+        if not questions:
+            print(f"❌ No questions generated for {email}, skipping user...")
+            continue
+        
+        print(f"✅ Generated {len(questions)} questions for {email}")
         
         # Create RAG instance
         rag = OptimizedRAG(pinecone_index, embed_model, llm, user_id=user_id)
@@ -618,6 +647,7 @@ def run_evaluation(users, pinecone_index, embed_model, llm):
         rag_wrapper = RAGWrapper(rag)
         
         # Setup TruLens feedbacks - 5 metrics
+        print(f"🔧 Setting up TruLens feedbacks...")
         f_relevance = Feedback(feedback_relevance, name="Relevance").on_input_output()
         f_quality = Feedback(feedback_quality, name="Quality").on_input_output()
         f_groundedness = Feedback(feedback_groundedness, name="Groundedness").on_input_output()
@@ -637,11 +667,14 @@ def run_evaluation(users, pinecone_index, embed_model, llm):
         )
         
         print(f"🔄 Evaluating {len(questions)} questions for {email}...")
+        print(f"{'='*60}")
         
         # Run evaluation with TruLens
         with tru_app as recording:
             for q_idx, question in enumerate(questions, 1):
-                print(f"  {q_idx}/{len(questions)}: {question[:50]}...")
+                print(f"📝 Question {q_idx}/{len(questions)}: {question[:80]}...")
+                
+                # Get response
                 response = rag_wrapper.respond(question)
                 
                 # Calculate scores
@@ -652,6 +685,12 @@ def run_evaluation(users, pinecone_index, embed_model, llm):
                     'context_relevance': feedback_context_relevance(question, response),
                     'correctness': feedback_correctness(question, response)
                 }
+                
+                # Print metrics
+                print(f"   📊 Relevance: {scores['relevance']:.3f} | Quality: {scores['quality']:.3f} | Groundedness: {scores['groundedness']:.3f}")
+                print(f"   📊 Context Relevance: {scores['context_relevance']:.3f} | Correctness: {scores['correctness']:.3f}")
+                print(f"   ✅ Response: {response[:100]}...")
+                print(f"{'-'*60}")
                 
                 # Save to database
                 eval_data = {
@@ -668,19 +707,48 @@ def run_evaluation(users, pinecone_index, embed_model, llm):
                 db.save_evaluation(eval_data)
                 total_questions += 1
                 
-                # Update status
-                db.update_status({
-                    'run_id': RUN_ID,
-                    'total_users': len(users),
-                    'completed_users': user_idx + 1,
-                    'total_questions': total_questions,
-                    'completed_questions': total_questions,
-                    'current_user': email,
-                    'status': 'running',
-                    'message': f'Evaluated {total_questions} questions'
-                })
+                # Update status every 5 questions
+                if q_idx % 5 == 0:
+                    db.update_status({
+                        'run_id': RUN_ID,
+                        'total_users': len(users),
+                        'completed_users': user_idx,
+                        'total_questions': total_questions,
+                        'completed_questions': total_questions,
+                        'current_user': email,
+                        'status': 'running',
+                        'message': f'Evaluated {total_questions} questions'
+                    })
+        
+        print(f"{'='*60}")
+        print(f"⏳ Waiting for TruLens feedback computation to complete for {email}...")
+        try:
+            tru_app.wait_for_feedback_results()
+            print(f"✅ TruLens feedbacks completed for {email}")
+        except Exception as e:
+            print(f"⚠️ Feedback wait error: {e}")
+        
+        all_tru_apps.append(tru_app)
+        
+        # Update status after user complete
+        db.update_status({
+            'run_id': RUN_ID,
+            'total_users': len(users),
+            'completed_users': user_idx + 1,
+            'total_questions': total_questions,
+            'completed_questions': total_questions,
+            'current_user': '',
+            'status': 'running',
+            'message': f'✅ Completed user {user_idx+1}/{len(users)}: {email}'
+        })
         
         print(f"✅ Completed evaluation for {email}")
+        print(f"{'='*60}\n")
+    
+    # Wait for any remaining feedbacks
+    if all_tru_apps:
+        print("\n⏳ Waiting for all TruLens feedbacks to complete...")
+        time.sleep(5)
     
     # Final status
     db.update_status({
@@ -695,7 +763,9 @@ def run_evaluation(users, pinecone_index, embed_model, llm):
     })
     
     print("\n" + "="*60)
-    print(f"✅ Evaluation complete! {total_questions} questions evaluated")
+    print(f"✅ EVALUATION COMPLETE!")
+    print(f"📊 Total Users: {len(users)}")
+    print(f"📝 Total Questions: {total_questions}")
     print(f"📁 Data saved to: default.sqlite")
     print("="*60)
     
