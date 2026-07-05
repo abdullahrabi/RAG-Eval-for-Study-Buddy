@@ -26,7 +26,9 @@ torch
 torchvision  
 torchaudio
 sqlalchemy
-
+plotly
+pandas
+llama-index
 #API Connection
 Flask
 flask-cors

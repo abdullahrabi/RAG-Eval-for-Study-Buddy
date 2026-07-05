@@ -1,4 +1,4 @@
-# RAG_Eval_All_Users.py - Evaluate RAG for All Users
+# RAG_Eval_All_Users.py - Complete RAG Evaluation for All Users
 import os
 import time
 import re
@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 from datetime import datetime
 from typing import List, Dict, Any
 import sys
-import threading
 import concurrent.futures
 from collections import defaultdict
 
@@ -30,13 +29,20 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME", "studybuddy")
+PORT = int(os.getenv("PORT", 8501))
 
 print(f"GEMINI_API_KEY: {'✅' if GEMINI_API_KEY else '❌'}")
 print(f"PINECONE_API_KEY: {'✅' if PINECONE_API_KEY else '❌'}")
 print(f"GROQ_API_KEY: {'✅' if GROQ_API_KEY else '❌'}")
+print(f"INDEX_NAME: {INDEX_NAME}")
+print(f"PORT: {PORT}")
 
 if not GEMINI_API_KEY or not PINECONE_API_KEY or not GROQ_API_KEY:
     print("❌ Missing API keys!")
+    print("\nPlease set the following environment variables:")
+    print("  - GEMINI_API_KEY")
+    print("  - PINECONE_API_KEY")
+    print("  - GROQ_API_KEY")
     sys.exit(1)
 
 # ============================================
@@ -51,8 +57,13 @@ from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
 # TruLens imports
-from trulens.core import TruSession, Feedback
-from trulens.apps.app import TruApp
+try:
+    from trulens.core import TruSession, Feedback
+    from trulens.apps.app import TruApp
+    TRULENS_AVAILABLE = True
+except ImportError:
+    TRULENS_AVAILABLE = False
+    print("⚠️ TruLens not available. Running without TruLens.")
 
 # ============================================
 # RUN ID
@@ -124,7 +135,6 @@ def fetch_all_users(pinecone_index) -> List[Dict]:
     print("\n🔍 Fetching all users from Pinecone...")
     
     try:
-        # Query with a dummy vector to get all user entries
         import random
         dummy_vector = [random.uniform(0.01, 0.02) for _ in range(768)]
         
@@ -189,7 +199,6 @@ def fetch_user_notes(pinecone_index, user_id: str) -> List[Dict]:
                     'source': match.metadata.get('source', 'uploaded_notes')
                 })
         
-        # Sort by chunk index
         notes.sort(key=lambda x: x.get('chunk_index', 0))
         return notes
     except Exception as e:
@@ -205,36 +214,27 @@ def generate_questions_from_notes(notes: List[Dict], num_questions: int = 20) ->
     if not notes:
         return []
     
-    # Combine all note text
     full_text = " ".join([note['text'] for note in notes])
     
-    # Use LLM to generate questions
     try:
         from groq import Groq as GroqClient
         
         client = GroqClient(api_key=GROQ_API_KEY)
         
-        # Truncate text if too long
         if len(full_text) > 8000:
             full_text = full_text[:8000]
         
-        prompt = f"""Based on the following educational content about Automata Theory and Languages, generate {num_questions} thoughtful questions that test understanding of the material.
+        prompt = f"""Based on the following educational content, generate {num_questions} thoughtful questions.
 
 CONTENT:
 {full_text}
 
-Requirements:
-1. Questions should cover different topics from the content
-2. Include a mix of conceptual questions, definitions, and applications
-3. Questions should be answerable from the provided content
-4. Format as a numbered list (1. Question text?)
-
-Generate exactly {num_questions} questions:"""
+Generate exactly {num_questions} questions as a numbered list:"""
 
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that generates educational questions from content. Only output the numbered questions, nothing else."},
+                {"role": "system", "content": "Generate exactly the number of questions requested. Output only the numbered questions."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
@@ -243,21 +243,17 @@ Generate exactly {num_questions} questions:"""
         
         questions_text = response.choices[0].message.content.strip()
         
-        # Parse numbered questions
         questions = []
         for line in questions_text.split('\n'):
             line = line.strip()
-            # Match patterns like "1." or "1)" or "1. "
             match = re.match(r'^(\d+)[\.\)]?\s*(.*)', line)
             if match:
                 question_text = match.group(2).strip()
                 if question_text:
                     questions.append(question_text)
             elif line and len(line) > 10 and '?' in line:
-                # If line contains a question mark, it's likely a question
                 questions.append(line)
         
-        # If we didn't get enough questions, generate more
         if len(questions) < num_questions:
             questions = generate_fallback_questions(full_text, num_questions)
         
@@ -268,50 +264,25 @@ Generate exactly {num_questions} questions:"""
         return generate_fallback_questions(full_text, num_questions)
 
 def generate_fallback_questions(text: str, num_questions: int = 20) -> List[str]:
-    """Generate fallback questions using pattern matching"""
-    questions = []
-    
-    # Split into sentences
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [s for s in sentences if len(s) > 20]
-    
-    if not sentences:
-        return [
-            "What is automata theory?",
-            "What is a finite automaton?",
-            "What is the purpose of studying automata theory?",
-            "What are the applications of finite automata?"
-        ][:num_questions]
-    
-    # Generate questions from important sentences
-    for i, sentence in enumerate(sentences[:num_questions]):
-        if i % 3 == 0:
-            questions.append(f"What is the definition of '{sentence[:30]}...'?")
-        elif i % 3 == 1:
-            questions.append(f"What does the text say about '{sentence[:30]}...'?")
-        else:
-            questions.append(f"How is '{sentence[:30]}...' related to automata theory?")
-    
-    # Add some default questions
+    """Generate fallback questions"""
     default_questions = [
-        "What are the primary goals of studying automata theory?",
+        "What is automata theory?",
         "What is a finite automaton?",
         "What are the applications of finite automata?",
         "What is a formal language?",
         "What is the difference between a string and a language?",
         "What is the Kleene star operator?",
-        "What is the role of Turing machines in automata theory?",
+        "What is the role of Turing machines?",
         "What is the significance of the pumping lemma?",
-        "What are regular expressions and how are they used?",
+        "What are regular expressions?",
         "What is the relationship between finite automata and regular languages?"
     ]
     
-    # Fill remaining with default questions
+    questions = default_questions[:num_questions]
     while len(questions) < num_questions:
-        idx = len(questions) % len(default_questions)
-        questions.append(default_questions[idx])
+        questions.append(default_questions[len(questions) % len(default_questions)])
     
-    return questions[:num_questions]
+    return questions
 
 # ============================================
 # OPTIMIZED RAG SYSTEM
@@ -330,7 +301,6 @@ class OptimizedRAG:
             if not query_embedding:
                 return "No relevant documents found."
             
-            # Filter by user_id if provided
             filter_dict = {}
             if self.user_id:
                 filter_dict["user_id"] = {"$eq": self.user_id}
@@ -380,8 +350,12 @@ class ModelRouter:
             try:
                 response = self.client.chat.completions.create(
                     model=model,
-                    messages=[{"role": "system", "content": "Output ONLY a number 0-1."}, {"role": "user", "content": prompt}],
-                    temperature=0, max_tokens=10
+                    messages=[
+                        {"role": "system", "content": "Output ONLY a number between 0 and 1."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0,
+                    max_tokens=10
                 )
                 text = response.choices[0].message.content.strip()
                 nums = re.findall(r'(\d+\.?\d*)', text)
@@ -396,7 +370,7 @@ class ModelRouter:
         return 0.5
 
 # ============================================
-# TRULENS FEEDBACK FUNCTIONS
+# FEEDBACK FUNCTIONS
 # ============================================
 
 router = None
@@ -407,33 +381,32 @@ def get_router():
         router = ModelRouter(GROQ_API_KEY)
     return router
 
-def relevance(input: str, output: str) -> float:
+def evaluate_relevance(input: str, output: str) -> float:
     return get_router().call_model(f"Score relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
 
-def quality(input: str, output: str) -> float:
+def evaluate_quality(input: str, output: str) -> float:
     return get_router().call_model(f"Score quality 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
 
-def groundedness(input: str, output: str) -> float:
+def evaluate_groundedness(input: str, output: str) -> float:
     return get_router().call_model(f"Score groundedness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
 
-def context_relevance(input: str, output: str) -> float:
+def evaluate_context_relevance(input: str, output: str) -> float:
     return get_router().call_model(f"Score context relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
 
-def correctness(input: str, output: str) -> float:
+def evaluate_correctness(input: str, output: str) -> float:
     return get_router().call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
 
 # ============================================
 # EVALUATE SINGLE USER
 # ============================================
 
-def evaluate_user(user_data: Dict, pinecone_index, embed_model, llm, session) -> Dict:
-    """Evaluate a single user's RAG performance"""
+def evaluate_user_direct(user_data: Dict, pinecone_index, embed_model, llm) -> Dict:
+    """Evaluate a single user's RAG performance directly"""
     user_id = user_data['user_id']
     email = user_data['email']
     
     print(f"\n📊 Evaluating user: {email} ({user_id})")
     
-    # Fetch user's notes
     notes = fetch_user_notes(pinecone_index, user_id)
     
     if not notes:
@@ -449,7 +422,6 @@ def evaluate_user(user_data: Dict, pinecone_index, embed_model, llm, session) ->
     
     print(f"  📝 Found {len(notes)} note chunks")
     
-    # Generate questions from notes
     questions = generate_questions_from_notes(notes, num_questions=20)
     
     if not questions:
@@ -465,68 +437,67 @@ def evaluate_user(user_data: Dict, pinecone_index, embed_model, llm, session) ->
     
     print(f"  ❓ Generated {len(questions)} questions")
     
-    # Create RAG instance for this user
     rag = OptimizedRAG(pinecone_index, embed_model, llm, user_id=user_id)
     
-    class RAGWrapper:
-        def respond(self, question: str) -> str:
-            return rag.query(question)
+    results = []
+    for i, q in enumerate(questions, 1):
+        print(f"    {i}/{len(questions)}: {q[:40]}...")
+        
+        response = rag.query(q)
+        
+        scores = {
+            'relevance': evaluate_relevance(q, response),
+            'quality': evaluate_quality(q, response),
+            'groundedness': evaluate_groundedness(q, response),
+            'context_relevance': evaluate_context_relevance(q, response),
+            'correctness': evaluate_correctness(q, response)
+        }
+        
+        results.append({
+            'question': q,
+            'response': response[:500],
+            'scores': scores
+        })
     
-    rag_wrapper = RAGWrapper()
+    avg_scores = {
+        'relevance': sum(r['scores']['relevance'] for r in results) / len(results) if results else 0,
+        'quality': sum(r['scores']['quality'] for r in results) / len(results) if results else 0,
+        'groundedness': sum(r['scores']['groundedness'] for r in results) / len(results) if results else 0,
+        'context_relevance': sum(r['scores']['context_relevance'] for r in results) / len(results) if results else 0,
+        'correctness': sum(r['scores']['correctness'] for r in results) / len(results) if results else 0
+    }
     
-    # Setup feedback functions
-    f_relevance = Feedback(relevance, name="Relevance").on_input_output()
-    f_quality = Feedback(quality, name="Quality").on_input_output()
-    f_groundedness = Feedback(groundedness, name="Groundedness").on_input_output()
-    f_context_relevance = Feedback(context_relevance, name="Context Relevance").on_input_output()
-    f_correctness = Feedback(correctness, name="Correctness").on_input_output()
-    
-    # Create TruApp for this user
-    user_app_name = f"{APP_NAME}_{user_id}"
-    
-    tru_app = TruApp(
-        rag_wrapper,
-        app_name=user_app_name,
-        app_version="v1.0",
-        feedbacks=[f_relevance, f_quality, f_groundedness, f_context_relevance, f_correctness],
-        main_method=rag_wrapper.respond
-    )
-    
-    # Run evaluation
-    print(f"  🔄 Running evaluation with {len(questions)} questions...")
-    
-    with tru_app as recording:
-        for i, q in enumerate(questions, 1):
-            print(f"    {i}/{len(questions)}: {q[:40]}...")
-            rag_wrapper.respond(q)
+    print(f"  ✅ Completed: {len(results)} questions evaluated")
+    print(f"  📊 Avg Relevance: {avg_scores['relevance']*100:.1f}%")
     
     return {
         'user_id': user_id,
         'email': email,
         'notes_count': len(notes),
         'questions': questions,
-        'success': True,
-        'app_name': user_app_name
+        'results': results,
+        'avg_scores': avg_scores,
+        'success': True
     }
 
 # ============================================
 # PARALLEL EVALUATION
 # ============================================
 
-def run_parallel_evaluation(users: List[Dict], pinecone_index, embed_model, llm, session, max_workers: int = 3):
+def run_parallel_evaluation(users: List[Dict], pinecone_index, embed_model, llm, max_workers: int = 3):
     """Run evaluation for multiple users in parallel"""
     results = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_user = {
-            executor.submit(evaluate_user, user, pinecone_index, embed_model, llm, session): user
+            executor.submit(evaluate_user_direct, user, pinecone_index, embed_model, llm): user
             for user in users
         }
         
         for future in concurrent.futures.as_completed(future_to_user):
             user = future_to_user[future]
             try:
-                result = future.result(timeout=600)  # 10 minute timeout per user
+                result = future.result(timeout=600)
                 results.append(result)
                 print(f"✅ Completed evaluation for {user['email']}")
             except Exception as e:
@@ -541,6 +512,63 @@ def run_parallel_evaluation(users: List[Dict], pinecone_index, embed_model, llm,
     return results
 
 # ============================================
+# MAIN EVALUATION WITH TRULENS
+# ============================================
+
+def run_evaluation_with_trulens(users: List[Dict], pinecone_index, embed_model, llm):
+    """Run evaluation with TruLens if available"""
+    if not TRULENS_AVAILABLE:
+        print("⚠️ TruLens not available. Running without TruLens.")
+        return None, None
+    
+    try:
+        session = TruSession(database_url="sqlite:///trulens.db")
+        print("✅ Connected to TruLens database")
+        
+        # Define feedback functions
+        f_relevance = Feedback(evaluate_relevance, name="Relevance").on_input_output()
+        f_quality = Feedback(evaluate_quality, name="Quality").on_input_output()
+        f_groundedness = Feedback(evaluate_groundedness, name="Groundedness").on_input_output()
+        f_context_relevance = Feedback(evaluate_context_relevance, name="Context Relevance").on_input_output()
+        f_correctness = Feedback(evaluate_correctness, name="Correctness").on_input_output()
+        
+        # Evaluate first user with TruLens
+        if users:
+            user = users[0]
+            rag = OptimizedRAG(pinecone_index, embed_model, llm, user_id=user['user_id'])
+            
+            class RAGWrapper:
+                def respond(self, question: str) -> str:
+                    return rag.query(question)
+            
+            rag_wrapper = RAGWrapper()
+            
+            tru_app = TruApp(
+                rag_wrapper,
+                app_name=APP_NAME,
+                app_version="v1.0",
+                feedbacks=[f_relevance, f_quality, f_groundedness, f_context_relevance, f_correctness],
+                main_method=rag_wrapper.respond
+            )
+            
+            questions = generate_questions_from_notes(fetch_user_notes(pinecone_index, user['user_id']), 5)
+            
+            print(f"📊 Running TruLens evaluation with {len(questions)} questions...")
+            
+            with tru_app as recording:
+                for q in questions:
+                    rag_wrapper.respond(q)
+            
+            tru_app.wait_for_feedback_results()
+            print("✅ TruLens evaluation complete")
+            
+            return session, tru_app
+    
+    except Exception as e:
+        print(f"⚠️ TruLens error: {e}")
+        return None, None
+
+# ============================================
 # MAIN EVALUATION
 # ============================================
 
@@ -551,27 +579,24 @@ def run_evaluation():
     print("🚀 RAG EVALUATION FOR ALL USERS")
     print("="*60)
     
-    # Initialize Pinecone
     try:
         pc = Pinecone(api_key=PINECONE_API_KEY)
         pinecone_index = pc.Index(INDEX_NAME)
         print(f"✅ Connected to Pinecone index: {INDEX_NAME}")
     except Exception as e:
         print(f"❌ Failed to connect to Pinecone: {e}")
-        return None
+        return None, None
     
-    # Fetch all users
     users = fetch_all_users(pinecone_index)
     
     if not users:
         print("❌ No users found in Pinecone!")
-        return None
+        return None, None
     
     print(f"\n👥 Found {len(users)} users:")
     for user in users:
         print(f"  - {user['email']} ({user['user_id']})")
     
-    # Initialize embedding and LLM
     try:
         embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
         llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
@@ -580,23 +605,16 @@ def run_evaluation():
         print("✅ Initialized embedding and LLM")
     except Exception as e:
         print(f"❌ Failed to initialize: {e}")
-        return None
+        return None, None
     
-    # Initialize TruLens session
-    try:
-        session = TruSession(database_url="sqlite:///trulens.db")
-        print("✅ Connected to TruLens database")
-    except Exception as e:
-        print(f"❌ Failed to connect to TruLens: {e}")
-        return None
+    # Run TruLens evaluation first
+    session, tru_app = run_evaluation_with_trulens(users, pinecone_index, embed_model, llm)
     
-    # Run parallel evaluation
     print(f"\n📊 Running parallel evaluation with up to 3 users at a time...")
     print("="*60)
     
-    results = run_parallel_evaluation(users, pinecone_index, embed_model, llm, session, max_workers=3)
+    results = run_parallel_evaluation(users, pinecone_index, embed_model, llm, max_workers=3)
     
-    # Summary
     print("\n" + "="*60)
     print("📊 EVALUATION SUMMARY")
     print("="*60)
@@ -607,49 +625,96 @@ def run_evaluation():
     print(f"✅ Successful: {len(successful)}")
     print(f"❌ Failed: {len(failed)}")
     
-    total_questions = sum(r.get('questions', []) for r in successful)
-    print(f"📝 Total questions generated: {len(total_questions)}")
+    all_results = []
+    for r in successful:
+        for q_result in r.get('results', []):
+            all_results.append({
+                'user_id': r['user_id'],
+                'email': r['email'],
+                'question': q_result['question'],
+                'response': q_result['response'],
+                'relevance': q_result['scores']['relevance'],
+                'quality': q_result['scores']['quality'],
+                'groundedness': q_result['scores']['groundedness'],
+                'context_relevance': q_result['scores']['context_relevance'],
+                'correctness': q_result['scores']['correctness']
+            })
     
-    # Save results
-    results_df = pd.DataFrame(results)
-    results_df.to_csv(f"evaluation_results_{RUN_ID}.csv", index=False)
-    print(f"💾 Results saved to: evaluation_results_{RUN_ID}.csv")
+    df = None
+    if all_results:
+        df = pd.DataFrame(all_results)
+        df.to_csv(f"evaluation_results_{RUN_ID}.csv", index=False)
+        print(f"💾 Results saved to: evaluation_results_{RUN_ID}.csv")
+        
+        print("\n📊 Average Scores Across All Users:")
+        print(f"  Relevance: {df['relevance'].mean()*100:.1f}%")
+        print(f"  Quality: {df['quality'].mean()*100:.1f}%")
+        print(f"  Groundedness: {df['groundedness'].mean()*100:.1f}%")
+        print(f"  Context Relevance: {df['context_relevance'].mean()*100:.1f}%")
+        print(f"  Correctness: {df['correctness'].mean()*100:.1f}%")
     
-    return session, results
+    return session, df
 
 # ============================================
 # DASHBOARD LAUNCHER
 # ============================================
 
-def launch_dashboard(session):
-    """Launch the TruLens dashboard"""
+def launch_dashboard(session=None):
+    """Launch the dashboard"""
     print("\n" + "="*60)
-    print("📊 Launching TruLens Dashboard...")
+    print("📊 Launching Dashboard...")
     print("="*60)
     
+    # Try TruLens dashboard first
+    if session and TRULENS_AVAILABLE:
+        try:
+            from trulens.dashboard import run_dashboard
+            
+            print(f"Starting TruLens dashboard on port {PORT}...")
+            run_dashboard(session=session, port=PORT)
+            return
+        except Exception as e:
+            print(f"⚠️ TruLens dashboard error: {e}")
+    
+    # Fallback: Streamlit dashboard
     try:
-        from trulens.dashboard import run_dashboard
+        import subprocess
+        import sys
         
-        print("Starting dashboard on port 8502...")
-        run_dashboard(session=session, port=8502)
+        dashboard_file = "live_eval_dashboard.py"
         
-    except ImportError:
-        print("❌ TruLens dashboard module not found")
-        print("💡 Try running: streamlit run trulens/dashboard/app.py")
+        if os.path.exists(dashboard_file):
+            print(f"Starting Streamlit dashboard on port {PORT}...")
+            subprocess.run([
+                sys.executable, "-m", "streamlit", "run", dashboard_file,
+                "--server.port", str(PORT),
+                "--server.address", "0.0.0.0",
+                "--server.headless", "true"
+            ])
+        else:
+            print("❌ Dashboard file not found: live_eval_dashboard.py")
+            print("💡 You can view results in the CSV file.")
     except Exception as e:
         print(f"⚠️ Dashboard error: {e}")
         print("\n💡 You can view results using:")
         print(f"  - CSV file: evaluation_results_{RUN_ID}.csv")
-        print("  - TruLens database: sqlite3 trulens.db")
+        if session and TRULENS_AVAILABLE:
+            print("  - TruLens database: sqlite3 trulens.db")
 
 # ============================================
 # MAIN
 # ============================================
 
 if __name__ == "__main__":
-    session, results = run_evaluation()
+    # Run evaluation
+    session, df = run_evaluation()
     
-    if session:
+    if session or df is not None:
+        print("\n" + "="*60)
+        print("📊 Launching Dashboard...")
+        print("="*60)
+        
+        # Launch dashboard
         launch_dashboard(session)
     else:
         print("\n❌ Evaluation failed. Check the logs above.")
