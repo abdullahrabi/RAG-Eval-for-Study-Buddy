@@ -1,6 +1,7 @@
 """
-RAG_Eval_All_Users_TruLens.py - FINAL WORKING VERSION
-Based on your working code - uses TruLens default.sqlite correctly
+RAG_Eval_All_Users_TruLens.py - TRULENS NATIVE DASHBOARD VERSION
+Uses TruLens built-in dashboard with default.sqlite database
+Multi-user RAG evaluation with TruLens dashboard
 """
 
 import os
@@ -32,7 +33,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME", "studybuddy")
-PORT = int(os.getenv("PORT", 8080))
+PORT = int(os.getenv("PORT", 8501))
 
 print(f"GEMINI_API_KEY: {'✅' if GEMINI_API_KEY else '❌'}")
 print(f"PINECONE_API_KEY: {'✅' if PINECONE_API_KEY else '❌'}")
@@ -60,10 +61,11 @@ from llama_index.core import Settings
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports - CORRECT WAY (from your working code)
+# TruLens imports
 try:
     from trulens.core import TruSession, Feedback
     from trulens.apps.app import TruApp
+    from trulens.dashboard import run_dashboard
     TRULENS_AVAILABLE = True
     print("✅ TruLens available")
 except ImportError as e:
@@ -170,7 +172,7 @@ def get_router():
     return _router
 
 # ============================================
-# FEEDBACK FUNCTIONS - SAME AS YOUR WORKING CODE
+# FEEDBACK FUNCTIONS
 # ============================================
 
 def feedback_relevance(input: str, output: str) -> float:
@@ -192,13 +194,6 @@ def feedback_context_relevance(input: str, output: str) -> float:
 def feedback_correctness(input: str, output: str) -> float:
     router = get_router()
     return router.call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
-
-# Alias for convenience
-relevance = feedback_relevance
-quality = feedback_quality
-groundedness = feedback_groundedness
-context_relevance = feedback_context_relevance
-correctness = feedback_correctness
 
 # ============================================
 # FETCH ALL USERS FROM PINECONE
@@ -410,7 +405,7 @@ ANSWER:"""
             return f"Error: {e}"
 
 # ============================================
-# EVALUATOR WITH TRULENS - USING YOUR WORKING APPROACH
+# EVALUATOR WITH TRULENS
 # ============================================
 
 class TruLensBackgroundEvaluator:
@@ -419,7 +414,7 @@ class TruLensBackgroundEvaluator:
         self.thread = None
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Initialize TruLens session with default.sqlite (YOUR WORKING APPROACH)
+        # Initialize TruLens session with default.sqlite
         self.db_path = "default.sqlite"
         self.session = None
         self.tru_app = None
@@ -427,7 +422,6 @@ class TruLensBackgroundEvaluator:
         
         if TRULENS_AVAILABLE:
             try:
-                # CORRECT WAY - same as your working code
                 self.session = TruSession(database_url="sqlite:///default.sqlite")
                 print(f"✅ TruLens session initialized with {self.db_path}")
                 print(f"📁 Database location: {os.path.abspath(self.db_path)}")
@@ -435,16 +429,16 @@ class TruLensBackgroundEvaluator:
                 print(f"⚠️ TruLens session error: {e}")
                 self.session = None
         
-        # Create custom tables for dashboard
+        # Create custom tables for fallback dashboard
         self._init_custom_tables()
     
     def _init_custom_tables(self):
-        """Initialize custom tables for dashboard"""
+        """Initialize custom tables for fallback dashboard"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Custom evaluations table for dashboard
+            # Custom evaluations table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS evaluations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -463,7 +457,7 @@ class TruLensBackgroundEvaluator:
                 )
             """)
             
-            # Status table for real-time updates
+            # Status table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS eval_status (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -481,7 +475,7 @@ class TruLensBackgroundEvaluator:
             
             conn.commit()
             conn.close()
-            print("✅ Custom tables initialized for dashboard")
+            print("✅ Custom tables initialized for fallback dashboard")
         except Exception as e:
             print(f"⚠️ Custom tables error: {e}")
     
@@ -613,7 +607,7 @@ class TruLensBackgroundEvaluator:
                 # Create RAG instance
                 rag = OptimizedRAG(pinecone_index, embed_model, llm, user_id=user_id)
                 
-                # Create RAG wrapper for TruLens - SAME AS YOUR WORKING CODE
+                # Create RAG wrapper for TruLens
                 class RAGWrapper:
                     def __init__(self, rag_instance):
                         self.rag = rag_instance
@@ -624,28 +618,25 @@ class TruLensBackgroundEvaluator:
                 self.rag_wrapper = RAGWrapper(rag)
                 
                 # ============================================
-                # TRULENS EVALUATION - SAME AS YOUR WORKING CODE
+                # TRULENS EVALUATION
                 # ============================================
                 if TRULENS_AVAILABLE and self.session:
                     try:
-                        # Create feedback functions - SAME AS YOUR WORKING CODE
+                        # Create feedback functions
                         f_relevance = Feedback(feedback_relevance, name="Relevance").on_input_output()
                         f_quality = Feedback(feedback_quality, name="Quality").on_input_output()
                         f_groundedness = Feedback(feedback_groundedness, name="Groundedness").on_input_output()
                         f_context_relevance = Feedback(feedback_context_relevance, name="Context Relevance").on_input_output()
                         f_correctness = Feedback(feedback_correctness, name="Correctness").on_input_output()
                         
-                        # Create TruLens app - SAME AS YOUR WORKING CODE
+                        # Create TruLens app
                         self.tru_app = TruApp(
                             self.rag_wrapper,
                             app_name=f"{APP_NAME}_{email}",
                             app_version="v1.0",
                             feedbacks=[
-                                f_relevance, 
-                                f_quality, 
-                                f_groundedness, 
-                                f_context_relevance, 
-                                f_correctness
+                                f_relevance, f_quality, f_groundedness, 
+                                f_context_relevance, f_correctness
                             ],
                             main_method=self.rag_wrapper.respond
                         )
@@ -661,7 +652,7 @@ class TruLensBackgroundEvaluator:
                                 print(f"  {q_idx}/{len(questions)}: {question[:50]}...")
                                 response = self.rag_wrapper.respond(question)
                                 
-                                # Save to custom tables for dashboard
+                                # Save to custom tables for fallback dashboard
                                 scores = {
                                     'relevance': feedback_relevance(question, response),
                                     'quality': feedback_quality(question, response),
@@ -695,7 +686,7 @@ class TruLensBackgroundEvaluator:
                                     'message': f'Evaluated {total_questions} questions'
                                 })
                         
-                        # Wait for TruLens to process feedback - SAME AS YOUR WORKING CODE
+                        # Wait for TruLens to process feedback
                         print("⏳ Waiting for TruLens feedback processing...")
                         time.sleep(5)
                         
@@ -796,11 +787,11 @@ class TruLensBackgroundEvaluator:
         print("⏹️ Evaluation stopped")
 
 # ============================================
-# CREATE DASHBOARD
+# CREATE FALLBACK DASHBOARD
 # ============================================
 
-def create_dashboard_file():
-    """Create the Streamlit dashboard file"""
+def create_fallback_dashboard_file():
+    """Create fallback Streamlit dashboard file (used if TruLens dashboard fails)"""
     
     dashboard_code = '''
 import streamlit as st
@@ -816,7 +807,7 @@ st.set_page_config(
 )
 
 st.title("📊 Live RAG Evaluation Dashboard")
-st.caption(f"📁 Database: default.sqlite | 🔧 TruLens Powered")
+st.caption(f"📁 Database: default.sqlite | 🔧 Fallback Mode")
 
 DB_PATH = "default.sqlite"
 
@@ -863,14 +854,7 @@ auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
 refresh_interval = st.sidebar.slider("Refresh interval (seconds)", 1, 10, 3)
 
 st.sidebar.markdown("---")
-st.sidebar.info("""
-**TruLens Metrics:**
-- 🎯 Relevance
-- ⭐ Quality  
-- 📚 Groundedness
-- 🔗 Context Relevance
-- ✅ Correctness
-""")
+st.sidebar.info("**TruLens Metrics:**\\n- 🎯 Relevance\\n- ⭐ Quality\\n- 📚 Groundedness\\n- 🔗 Context Relevance\\n- ✅ Correctness")
 
 status = get_status()
 
@@ -942,16 +926,16 @@ if auto_refresh:
     st.rerun()
 '''
 
-    with open("dashboard.py", "w") as f:
+    with open("dashboard_fallback.py", "w") as f:
         f.write(dashboard_code)
-    print("✅ Dashboard file created")
+    print("✅ Fallback dashboard file created")
 
 # ============================================
 # MAIN
 # ============================================
 
 def main():
-    """Main function - runs evaluation and dashboard"""
+    """Main function - runs evaluation and TruLens dashboard"""
     
     print("\n" + "="*60)
     print("🚀 Starting TruLens RAG Evaluation System")
@@ -960,9 +944,6 @@ def main():
     print(f"📍 Location: {os.path.abspath('default.sqlite')}")
     print(f"🔧 TruLens: {'✅ Available' if TRULENS_AVAILABLE else '❌ Not Available'}")
     print("="*60)
-    
-    # Create dashboard file
-    create_dashboard_file()
     
     # Initialize Pinecone
     try:
@@ -1001,20 +982,50 @@ def main():
     evaluator = TruLensBackgroundEvaluator()
     evaluator.start(users, pinecone_index, embed_model, llm)
     
-    print("\n" + "="*60)
-    print("📊 Starting Dashboard...")
-    print("="*60)
-    print(f"✅ Dashboard available at: http://localhost:{PORT}")
-    print(f"📁 Database: default.sqlite")
-    print(f"🔧 TruLens: {'✅ Integrated' if TRULENS_AVAILABLE else '❌ Fallback Mode'}")
-    print("🔄 Evaluation is running in the background!")
-    print("📈 Results will update in real-time")
-    print("="*60)
+    # ============================================
+    # LAUNCH TRULENS NATIVE DASHBOARD
+    # ============================================
     
-    # Start Streamlit dashboard
-    try:
+    if TRULENS_AVAILABLE and evaluator.session:
+        print("\n" + "="*60)
+        print("📊 Launching TruLens Native Dashboard...")
+        print("="*60)
+        print(f"✅ TruLens Dashboard available at: http://localhost:{PORT}")
+        print(f"📁 Database: default.sqlite")
+        print("🔄 Evaluation is running in the background!")
+        print("📈 Results will update in real-time")
+        print("="*60)
+        
+        try:
+            # Launch TruLens native dashboard
+            run_dashboard(session=evaluator.session, port=PORT)
+        except Exception as e:
+            print(f"⚠️ TruLens dashboard error: {e}")
+            print("🔄 Falling back to custom dashboard...")
+            
+            # Create and launch fallback dashboard
+            create_fallback_dashboard_file()
+            cmd = [
+                "streamlit", "run", "dashboard_fallback.py",
+                "--server.port", str(PORT),
+                "--server.address", "0.0.0.0",
+                "--server.headless", "true",
+                "--server.enableCORS", "false",
+                "--server.enableXsrfProtection", "false"
+            ]
+            subprocess.run(cmd)
+    else:
+        # TruLens not available - use fallback dashboard
+        print("\n" + "="*60)
+        print("📊 Launching Fallback Dashboard...")
+        print("="*60)
+        print(f"✅ Dashboard available at: http://localhost:{PORT}")
+        print(f"📁 Database: default.sqlite")
+        print("="*60)
+        
+        create_fallback_dashboard_file()
         cmd = [
-            "streamlit", "run", "dashboard.py",
+            "streamlit", "run", "dashboard_fallback.py",
             "--server.port", str(PORT),
             "--server.address", "0.0.0.0",
             "--server.headless", "true",
@@ -1022,16 +1033,6 @@ def main():
             "--server.enableXsrfProtection", "false"
         ]
         subprocess.run(cmd)
-    except KeyboardInterrupt:
-        print("\n⏹️ Stopping system...")
-        sys.exit(0)
-    except Exception as e:
-        print(f"⚠️ Dashboard error: {e}")
-        try:
-            while True:
-                time.sleep(60)
-        except KeyboardInterrupt:
-            sys.exit(0)
 
 if __name__ == "__main__":
     main()
