@@ -10,7 +10,7 @@ from RAG_Eval import main as evaluator_main, create_dashboard_file
 
 def run_dashboard():
     """Run Streamlit dashboard"""
-    port = os.getenv("PORT", "8501")
+    port = os.getenv("PORT", "8080")
     cmd = [
         "streamlit", "run", "dashboard.py",
         "--server.port", port,
