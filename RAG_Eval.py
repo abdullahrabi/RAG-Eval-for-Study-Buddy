@@ -250,7 +250,7 @@ Questions should be:
 Output ONLY the questions as a numbered list (1 to {num_questions}):"""
 
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-120b",
             messages=[
                 {"role": "system", "content": f"Generate exactly {num_questions} questions based on the provided content. Output only the numbered questions."},
                 {"role": "user", "content": prompt}
@@ -312,7 +312,7 @@ Generate {num_needed} additional questions covering different aspects of the con
 Output ONLY the questions as a numbered list:"""
 
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-120b",
             messages=[
                 {"role": "system", "content": f"Generate {num_needed} additional questions. Output only the numbered questions."},
                 {"role": "user", "content": prompt}
@@ -385,23 +385,23 @@ def get_router():
 
 def feedback_relevance(input: str, output: str) -> float:
     router = get_router()
-    return router.call_model(f"Score relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
+    return router.call_model(f"Score relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-20b")
 
 def feedback_quality(input: str, output: str) -> float:
     router = get_router()
-    return router.call_model(f"Score quality 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
+    return router.call_model(f"Score quality 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-20b")
 
 def feedback_groundedness(input: str, output: str) -> float:
     router = get_router()
-    return router.call_model(f"Score groundedness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
+    return router.call_model(f"Score groundedness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-120b")
 
 def feedback_context_relevance(input: str, output: str) -> float:
     router = get_router()
-    return router.call_model(f"Score context relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.1-8b-instant")
+    return router.call_model(f"Score context relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-20b")
 
 def feedback_correctness(input: str, output: str) -> float:
     router = get_router()
-    return router.call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "llama-3.3-70b-versatile")
+    return router.call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-120b")
 
 # ============================================
 # OPTIMIZED RAG SYSTEM
@@ -811,7 +811,7 @@ def main():
     # Initialize embedding and LLM
     try:
         embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
-        llm = LlamaGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY, temperature=0.3)
+        llm = LlamaGroq(model="openai/gpt-oss-120b", api_key=GROQ_API_KEY, temperature=0.3)
         Settings.embed_model = embed_model
         Settings.llm = llm
         print("✅ Initialized embedding and LLM")
