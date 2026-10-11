@@ -1,36 +1,36 @@
-# Python 3.11 Required - Do not use other versions
+# ─── Core ──────────────────────────────────────────────
 python-dotenv
 numpy
 pandas
+sqlalchemy
+
+# ─── UI ────────────────────────────────────────────────
 streamlit
-# Google Generative AI
- google-genai
+plotly
 
-# Pinecone
-pinecone
-
-# Groq
+# ─── LLM providers ─────────────────────────────────────
+google-genai
 groq
 
-# LlamaIndex
+# ─── Vector store ──────────────────────────────────────
+pinecone
+
+# ─── LlamaIndex ────────────────────────────────────────
+llama-index
 llama-index-core
 llama-index-llms-groq
 
-# TruLens
+# ─── Observability / eval (TruLens) ────────────────────
 trulens-core
 trulens-providers-litellm
-litellm
 trulens-apps-llamaindex
 trulens-feedback
 trulens-dashboard
-jsonschema
-torch 
-torchvision  
-torchaudio
-sqlalchemy
-plotly
-pandas
-llama-index
-#API Connection
+litellm
+
+# ─── API layer ─────────────────────────────────────────
 Flask
 flask-cors
+
+# ─── Support ───────────────────────────────────────────
+jsonschema
