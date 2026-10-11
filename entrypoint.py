@@ -86,7 +86,7 @@ if __name__ == "__main__":
     print("\n📊 Starting TruLens Dashboard...")
 
     dashboard_process = subprocess.Popen(
-        [sys.executable, "dashboard.py"]
+        [sys.executable, "Dashboard.py"]
     )
 
     # =========================================================
