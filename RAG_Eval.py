@@ -1035,7 +1035,7 @@ def create_metrics():
                 "source": Selector.select_context(collect_list=True),
                 "text": Selector.select_record_output(),
             },
-        ),
+        ), 
     ]
 
 
