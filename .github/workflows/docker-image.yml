@@ -63,8 +63,8 @@ jobs:
             docker run -d \
               --name rag-eval-container \
               --restart unless-stopped \
-              -p 8080:8080 \
-              --env-file /home/ubuntu/rag-eval/.env \
+              -p 8081:8080 \ 
+              --env-file /home/ec2-user/rag-eval/.env \
               $IMAGE
 
             docker image prune -f
