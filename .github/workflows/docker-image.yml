@@ -53,18 +53,12 @@ jobs:
             set -e
             IMAGE=${{ secrets.DOCKER_HUB_USERNAME }}/rag-eval:latest
 
-            echo "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" | \
-              docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
+            echo "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" | docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
 
             docker pull $IMAGE
             docker stop rag-eval-container || true
             docker rm   rag-eval-container || true
 
-            docker run -d \
-              --name rag-eval-container \
-              --restart unless-stopped \
-              -p 8081:8080 \ 
-              --env-file /home/ec2-user/rag-eval/.env \
-              $IMAGE
+            docker run -d --name rag-eval-container --restart unless-stopped -p 8081:8080 --env-file /home/ec2-user/rag-eval/.env $IMAGE
 
             docker image prune -f
