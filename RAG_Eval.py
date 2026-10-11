@@ -1,853 +1,1285 @@
 """
-RAG_Eval_All_Users_TruLens.py - FINAL COMPLETE VERSION
-Multi-user RAG evaluation with TruLens native dashboard
-25+ AI-generated questions per user from notes ONLY
-NO fallback questions - strictly AI-generated
-Complete logging of each question and metric
-Dashboard opens only after ALL evaluations complete
+RAG_Eval.py
+============================================================
+
+StudyBuddy RAG Evaluation System
+
+Architecture:
+    - TruLens is the ONLY evaluation database.
+    - No custom SQLite evaluation wrapper.
+    - No RAGWrapper.
+    - Direct OptimizedRAG app instrumentation.
+    - Questions are loaded from per-user cache files.
+    - Existing questions can be skipped on reruns.
+    - New questions are automatically added to TruLens.
+    - Dashboard can already be running while evaluation happens.
+    - Per-user question caching: loads existing questions, generates only the missing ones.
+    - Automatic top_k scaling based on corpus size.
+
+Evaluation metrics:
+    1. Answer Relevance
+    2. Answer Quality (context-aware)
+    3. Context Relevance
+    4. Groundedness
+    5. Correctness (context-aware)
+
+Models:
+    RAG generation:
+        openai/gpt-oss-20b (Groq) — light operation
+
+    Question generation:
+        openai/gpt-oss-120b (Groq) — light operation
+
+    All 5 evaluation metrics:
+        @cf/openai/gpt-oss-120b (Cloudflare Workers AI) — heavy workload
+        Fallback: Groq if Cloudflare credentials missing
+
+Embeddings:
+    Gemini Embedding 2
 """
 
 import os
-import time
 import re
-import warnings
-import pandas as pd
-import json
-import hashlib
-from dotenv import load_dotenv
-from datetime import datetime
-from typing import List, Dict, Any
 import sys
-import sqlite3
-import random
-import subprocess
+import time
+import json
+import warnings
+from datetime import datetime
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
+
+from dotenv import load_dotenv
 
 load_dotenv()
 
-print("="*60)
-print("🔍 RAG EVALUATION WITH TRULENS DASHBOARD")
-print("="*60)
+# ============================================================
+# SILENCE LITELLM COST-CALC TRACEBACKS
+# ============================================================
 
-# ============================================
-# ENVIRONMENT VARIABLES
-# ============================================
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY-1")
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID-1")
+
 INDEX_NAME = os.getenv("INDEX_NAME", "studybuddy")
-PORT = int(os.getenv("PORT", 8080))
+
+PORT = int(os.getenv("PORT", "8080"))
+
+QUESTIONS_FILE = os.getenv("QUESTIONS_FILE", "generated_questions.txt")
+QUESTIONS_DIR = os.getenv("QUESTIONS_DIR", "questions")
+
+TRULENS_DB_URL = os.getenv("TRULENS_DB_URL", "sqlite:///data/default.sqlite")
+
+APP_NAME = os.getenv("TRULENS_APP_NAME", "StudyBuddy RAG Evaluation")
+APP_VERSION = os.getenv("TRULENS_APP_VERSION", "v3")
+
+SKIP_EXISTING_QUESTIONS = (
+    os.getenv("SKIP_EXISTING_QUESTIONS", "true").lower() == "true"
+)
+
+# ------------------------------------------------------------
+# MODEL ASSIGNMENT
+# ------------------------------------------------------------
+
+RAG_MODEL = os.getenv("RAG_MODEL", "openai/gpt-oss-20b")
+QUESTION_MODEL = os.getenv("QUESTION_MODEL", "openai/gpt-oss-120b")
+
+FAST_EVAL_MODEL = os.getenv("FAST_EVAL_MODEL", "openai/gpt-oss-20b")
+DEEP_EVAL_MODEL = os.getenv("DEEP_EVAL_MODEL", "openai/gpt-oss-120b")
+
+CLOUDFLARE_MODEL = os.getenv(
+    "CLOUDFLARE_MODEL",
+    "@cf/openai/gpt-oss-120b"
+)
+
+FALLBACK_QUESTION_MODEL = os.getenv(
+    "FALLBACK_QUESTION_MODEL",
+    "moonshotai/kimi-k2-instruct"
+)
+
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "768"))
+
+QUESTIONS_PER_USER = int(os.getenv("QUESTIONS_PER_USER", "25"))
+INTER_QUESTION_DELAY = int(os.getenv("INTER_QUESTION_DELAY", "15"))
+
+# ------------------------------------------------------------
+# MAX_TOKENS LIMITS
+# ------------------------------------------------------------
+
+RAG_MAX_TOKENS = int(os.getenv("RAG_MAX_TOKENS", "2000"))
+QUESTION_MAX_TOKENS = int(os.getenv("QUESTION_MAX_TOKENS", "2500"))
+CLOUDFLARE_MAX_TOKENS = int(os.getenv("CLOUDFLARE_MAX_TOKENS", "500"))
+
+print("=" * 70)
+print("🔍 STUDYBUDDY RAG EVALUATION WITH TRULENS")
+print("=" * 70)
 
 print(f"GEMINI_API_KEY: {'✅' if GEMINI_API_KEY else '❌'}")
 print(f"PINECONE_API_KEY: {'✅' if PINECONE_API_KEY else '❌'}")
 print(f"GROQ_API_KEY: {'✅' if GROQ_API_KEY else '❌'}")
+print(f"CLOUDFLARE_API_KEY: {'✅' if CLOUDFLARE_API_KEY else '❌'}")
+print(f"CLOUDFLARE_ACCOUNT_ID: {'✅' if CLOUDFLARE_ACCOUNT_ID else '❌'}")
 print(f"INDEX_NAME: {INDEX_NAME}")
-print(f"PORT: {PORT}")
+print(f"QUESTIONS_FILE (legacy): {QUESTIONS_FILE}")
+print(f"QUESTIONS_DIR: {QUESTIONS_DIR}")
+print(f"TRULENS_DB_URL: {TRULENS_DB_URL}")
+print(f"APP_NAME: {APP_NAME}")
+print(f"APP_VERSION: {APP_VERSION}")
+print(f"RAG_MODEL: {RAG_MODEL}")
+print(f"RAG_MAX_TOKENS: {RAG_MAX_TOKENS}")
+print(f"QUESTION_MODEL: {QUESTION_MODEL}")
+print(f"QUESTION_MAX_TOKENS: {QUESTION_MAX_TOKENS}")
+print(f"CLOUDFLARE_MODEL: {CLOUDFLARE_MODEL}")
+print(f"CLOUDFLARE_MAX_TOKENS: {CLOUDFLARE_MAX_TOKENS}")
+print(f"FAST_EVAL_MODEL (Groq fallback): {FAST_EVAL_MODEL}")
+print(f"DEEP_EVAL_MODEL (Groq fallback): {DEEP_EVAL_MODEL}")
+print(f"FALLBACK_QUESTION_MODEL: {FALLBACK_QUESTION_MODEL}")
+print(f"QUESTIONS_PER_USER: {QUESTIONS_PER_USER}")
+print(f"INTER_QUESTION_DELAY: {INTER_QUESTION_DELAY}s")
+print("=" * 70)
 
-if not GEMINI_API_KEY or not PINECONE_API_KEY or not GROQ_API_KEY:
-    print("❌ Missing API keys!")
+if not GEMINI_API_KEY:
+    print("❌ GEMINI_API_KEY is missing.")
     sys.exit(1)
 
-# TruLens environment setup
+if not PINECONE_API_KEY:
+    print("❌ PINECONE_API_KEY is missing.")
+    sys.exit(1)
+
+if not GROQ_API_KEY:
+    print("❌ GROQ_API_KEY is missing.")
+    sys.exit(1)
+
+if not CLOUDFLARE_API_KEY or not CLOUDFLARE_ACCOUNT_ID:
+    print("⚠️ Cloudflare credentials missing.")
+    print("   All 5 metrics will fall back to Groq (may hit TPM limits).")
+
+os.makedirs(QUESTIONS_DIR, exist_ok=True)
+os.makedirs("data", exist_ok=True)
+
+
+# ============================================================
+# TRULENS / OTEL CONFIGURATION
+# ============================================================
+
 os.environ["TRULENS_OTEL_TRACING"] = "1"
 os.environ["TRULENS_OTEL_ENABLED"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "false"
+os.environ["TRULENS_FEEDBACK_MAX_WORKERS"] = "1"
 
-# ============================================
+
+# ============================================================
 # IMPORTS
-# ============================================
+# ============================================================
 
 from pinecone import Pinecone
+
 from google import genai
 from google.genai import types
-from llama_index.core import Settings
-from llama_index.core.base.embeddings.base import BaseEmbedding
-from llama_index.llms.groq import Groq as LlamaGroq
 
-# TruLens imports
-try:
-    from trulens.core import TruSession, Feedback
-    from trulens.apps.app import TruApp
-    from trulens.dashboard import run_dashboard
-    TRULENS_AVAILABLE = True
-    print("✅ TruLens available")
-except ImportError as e:
-    TRULENS_AVAILABLE = False
-    print(f"❌ TruLens not available: {e}")
-    print("❌ TruLens is REQUIRED. Please install: pip install trulens-eval")
-    sys.exit(1)
+from groq import Groq
+from openai import OpenAI
 
-RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
-APP_NAME = f"RAG_Eval_{RUN_ID}"
+from trulens.core import (
+    TruSession,
+    Metric,
+    Selector,
+)
 
-# ============================================
+from trulens.apps.app import TruApp
+
+from trulens.core.otel.instrument import instrument
+
+from trulens.otel.semconv.trace import SpanAttributes
+
+import logging
+logging.getLogger("litellm").setLevel(logging.CRITICAL)
+logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
+
+
+# ============================================================
+# TOP_K AUTO-SCALING
+# ============================================================
+
+def calculate_top_k(total_chunks: int) -> int:
+    """Auto-scale top_k based on corpus size."""
+    if total_chunks <= 20:
+        return 3
+    elif total_chunks <= 50:
+        return 5
+    elif total_chunks <= 100:
+        return 8
+    elif total_chunks <= 300:
+        return 15
+    elif total_chunks <= 600:
+        return 25
+    else:
+        return 40
+
+
+# ============================================================
+# CLOUDFLARE WORKERS AI PROVIDER
+# ============================================================
+
+class CloudflareProvider:
+    """
+    Custom provider for Cloudflare Workers AI with all 5 TruLens metrics.
+
+    Correctness and Answer Quality now receive the retrieved context
+    so the judge can assess correctness/quality WITH the source material,
+    not just the answer in isolation.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        account_id: str,
+        model: str,
+        max_tokens: int = CLOUDFLARE_MAX_TOKENS,
+    ):
+        self.model = model
+        self.max_tokens = max_tokens
+
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=(
+                f"https://api.cloudflare.com/client/v4/"
+                f"accounts/{account_id}/ai/v1"
+            ),
+        )
+
+    def _call(self, prompt: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=self.max_tokens,
+            temperature=0.0,
+        )
+        content = response.choices[0].message.content or ""
+        return content.strip()
+
+    def _parse_score(self, text: str) -> float:
+        match = re.search(
+            r'(?:score[:\s]+)?(\d+\.?\d*)',
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return 0.5
+        try:
+            score = float(match.group(1))
+            if score > 1.0 and score <= 100.0:
+                score = score / 100.0
+            return max(0.0, min(1.0, score))
+        except (ValueError, TypeError):
+            return 0.5
+
+    # --------------------------------------------------------
+    # TruLens-compatible metric methods
+    # --------------------------------------------------------
+
+    def relevance_with_cot_reasons(
+        self,
+        prompt: str,
+        response: str,
+    ) -> Tuple[float, Dict]:
+        """Answer Relevance score (question vs answer)."""
+        full_prompt = f"""You are an evaluation assistant.
+Score how directly the ANSWER addresses the QUESTION.
+
+QUESTION:
+{prompt[:1200]}
+
+ANSWER:
+{response[:2000]}
+
+Output a single number between 0 and 1.
+Format:
+Score: <number>
+Reason: <brief explanation>"""
+
+        text = self._call(full_prompt)
+        score = self._parse_score(text)
+        return score, {"reason": text[:500]}
+
+    def coherence(
+        self,
+        source: str,
+        text: str,
+    ) -> Tuple[float, Dict]:
+        """
+        Answer Quality / coherence score — CONTEXT-AWARE.
+
+        The judge now sees the retrieved context, so it can
+        properly assess whether the answer is complete, useful,
+        and appropriate given the source material.
+        """
+        full_prompt = f"""You are an evaluation assistant.
+Score the overall QUALITY of the ANSWER from 0 to 1.
+Consider clarity, completeness, usefulness, and whether the answer
+fully addresses what the context supports.
+
+Do NOT penalize short answers if the answer is complete.
+Do NOT penalize answers that correctly refuse when the context
+does not contain the information.
+
+CONTEXT (what the answer was based on):
+{source[:3000]}
+
+ANSWER:
+{text[:2000]}
+
+Output a single number between 0 and 1.
+Format:
+Score: <number>
+Reason: <brief explanation>"""
+
+        response_text = self._call(full_prompt)
+        score = self._parse_score(response_text)
+        return score, {"reason": response_text[:500]}
+
+    def context_relevance_with_cot_reasons(
+        self,
+        question: str,
+        context: str,
+    ) -> Tuple[float, Dict]:
+        """Context Relevance score (question vs retrieved chunks)."""
+        full_prompt = f"""You are an evaluation assistant.
+Score how RELEVANT the retrieved CONTEXT is to answering the QUESTION.
+1 = highly relevant. 0 = unrelated.
+
+QUESTION:
+{question[:1200]}
+
+CONTEXT:
+{context[:5000]}
+
+Output a single number between 0 and 1.
+Format:
+Score: <number>
+Reason: <brief explanation>"""
+
+        text = self._call(full_prompt)
+        score = self._parse_score(text)
+        return score, {"reason": text[:500]}
+
+    def groundedness_measure_with_cot_reasons(
+        self,
+        source: str,
+        statement: str,
+    ) -> Tuple[float, Dict]:
+        """Groundedness score (context vs answer claims)."""
+        full_prompt = f"""You are an evaluation assistant.
+Score GROUNDEDNESS from 0 to 1.
+Every substantive claim in the ANSWER should be supported by the CONTEXT.
+Penalize hallucinations or unsupported claims.
+
+CONTEXT:
+{source[:5000]}
+
+ANSWER:
+{statement[:3000]}
+
+Output a single number between 0 and 1.
+Format:
+Score: <number>
+Reason: <brief explanation>"""
+
+        text = self._call(full_prompt)
+        score = self._parse_score(text)
+        return score, {"reason": text[:500]}
+
+    def correctness(
+        self,
+        source: str,
+        text: str,
+    ) -> Tuple[float, Dict]:
+        """
+        Correctness score — CONTEXT-AWARE.
+
+        The judge now sees the retrieved context, so it can verify
+        whether the answer's facts match the source material rather
+        than trying to assess correctness in isolation.
+
+        This eliminates the "short answer penalization" problem
+        where terse but accurate answers were scored low.
+        """
+        full_prompt = f"""You are an evaluation assistant.
+Score CORRECTNESS from 0 to 1.
+Judge whether the ANSWER is factually correct AND consistent
+with the CONTEXT.
+
+A correct answer will match the facts in the context.
+If the context does not contain the information, saying so is correct.
+
+CONTEXT (source material):
+{source[:3000]}
+
+ANSWER:
+{text[:2000]}
+
+Output a single number between 0 and 1.
+Format:
+Score: <number>
+Reason: <brief explanation>"""
+
+        response_text = self._call(full_prompt)
+        score = self._parse_score(response_text)
+        return score, {"reason": response_text[:500]}
+
+
+# ============================================================
 # GEMINI EMBEDDING
-# ============================================
+# ============================================================
 
-class GeminiDirectEmbedding(BaseEmbedding):
-    api_key: str
-    model_name: str = "gemini-embedding-2"
-    dimension: int = 768
-    
-    def __init__(self, api_key: str, model_name: str = "gemini-embedding-2", dimension: int = 768, **kwargs):
-        super().__init__(api_key=api_key, model_name=model_name, dimension=dimension, **kwargs)
+class GeminiDirectEmbedding:
+    """Direct Gemini Embedding 2 client (768-dim)."""
+
+    QUERY_PREFIX = "task: search result | query: "
+
+    def __init__(
+        self,
+        api_key: str,
+        model_name: str = EMBEDDING_MODEL,
+        dimension: int = EMBEDDING_DIMENSION,
+    ):
+        self.api_key = api_key
+        self.model_name = model_name
+        self.dimension = dimension
         self._client = None
-    
+
     @property
     def client(self):
         if self._client is None:
             self._client = genai.Client(api_key=self.api_key)
         return self._client
-    
-    def _get_query_embedding(self, query: str) -> list:
-        return self._embed_text(query)
-    
-    def _get_text_embedding(self, text: str) -> list:
-        return self._embed_text(text)
-    
-    async def _aget_query_embedding(self, query: str) -> list:
-        return self._get_query_embedding(query)
-    
-    async def _aget_text_embedding(self, text: str) -> list:
-        return self._get_text_embedding(text)
-    
-    def _embed_text(self, text: str) -> list:
-        try:
-            if not text or not text.strip():
-                return None
-            if len(text) > 8000:
-                text = text[:8000]
-            result = self.client.models.embed_content(
-                model=self.model_name, contents=[text],
-                config=types.EmbedContentConfig(output_dimensionality=self.dimension)
-            )
-            if result and result.embeddings and len(result.embeddings) > 0:
-                emb = result.embeddings[0].values
-                norm = sum(v**2 for v in emb) ** 0.5
-                if norm > 0:
-                    return [v / norm for v in emb]
-            return None
-        except Exception:
-            return None
-    
-    @classmethod
-    def class_name(cls) -> str:
-        return "GeminiDirectEmbedding"
 
-# ============================================
-# FETCH ALL USERS FROM PINECONE
-# ============================================
+    def embed_text(self, text: str) -> Optional[List[float]]:
+        if not text or not text.strip():
+            return None
+
+        prefixed = (self.QUERY_PREFIX + text.strip())[:8000]
+
+        try:
+            result = self.client.models.embed_content(
+                model=self.model_name,
+                contents=[prefixed],
+                config=types.EmbedContentConfig(
+                    output_dimensionality=self.dimension
+                ),
+            )
+
+            if not result or not result.embeddings:
+                return None
+
+            embedding = result.embeddings[0].values
+            if not embedding:
+                return None
+
+            norm = sum(v * v for v in embedding) ** 0.5
+            if norm == 0:
+                return None
+
+            return [v / norm for v in embedding]
+
+        except Exception as exc:
+            print(f"⚠️ Gemini embedding error: {exc}")
+            return None
+
+    def embed_query(self, text: str) -> Optional[List[float]]:
+        return self.embed_text(text)
+
+
+# ============================================================
+# PINECONE USER DISCOVERY
+# ============================================================
 
 def fetch_all_users(pinecone_index) -> List[Dict]:
-    print("\n🔍 Fetching all users from Pinecone...")
-    
+    print()
+    print("🔍 Fetching users from Pinecone...")
+
     try:
-        dummy_vector = [random.uniform(0.01, 0.02) for _ in range(768)]
-        
+        dummy_vector = [0.01 for _ in range(EMBEDDING_DIMENSION)]
+
         results = pinecone_index.query(
             vector=dummy_vector,
-            top_k=1000,
+            top_k=10000,
             include_metadata=True,
             namespace="users",
-            filter={"type": {"$eq": "user_auth"}}
+            filter={"type": {"$eq": "user_auth"}},
         )
-        
+
         users = []
         seen_users = set()
-        
+
         for match in results.matches:
-            if match.metadata:
-                user_id = match.metadata.get('user_id')
-                email = match.metadata.get('email')
-                if user_id and user_id not in seen_users:
-                    seen_users.add(user_id)
-                    users.append({
-                        'user_id': user_id,
-                        'email': email,
-                        'created_at': match.metadata.get('created_at', '')
-                    })
-        
+            metadata = match.metadata
+            if not metadata:
+                continue
+
+            user_id = metadata.get("user_id")
+            email = metadata.get("email")
+
+            if not user_id or user_id in seen_users:
+                continue
+
+            seen_users.add(user_id)
+            users.append({
+                "user_id": user_id,
+                "email": email or user_id,
+                "created_at": metadata.get("created_at", ""),
+            })
+
         print(f"✅ Found {len(users)} users")
         return users
-    except Exception as e:
-        print(f"❌ Error fetching users: {e}")
+
+    except Exception as exc:
+        print(f"❌ Failed to fetch users: {exc}")
         return []
 
-# ============================================
-# FETCH NOTES FOR A USER
-# ============================================
+
+# ============================================================
+# USER NOTES
+# ============================================================
 
 def fetch_user_notes(pinecone_index, user_id: str) -> List[Dict]:
     try:
-        dummy_vector = [random.uniform(0.01, 0.02) for _ in range(768)]
-        
+        dummy_vector = [0.01 for _ in range(EMBEDDING_DIMENSION)]
+
         results = pinecone_index.query(
             vector=dummy_vector,
-            top_k=100,
+            top_k=10000,
             include_metadata=True,
             namespace="notes",
             filter={
                 "user_id": {"$eq": user_id},
-                "type": {"$eq": "notes"}
-            }
+                "type": {"$eq": "notes"},
+            },
         )
-        
+
         notes = []
+
         for match in results.matches:
-            if match.metadata:
-                notes.append({
-                    'id': match.id,
-                    'text': match.metadata.get('text', ''),
-                    'chunk_index': match.metadata.get('chunk_index', 0),
-                    'timestamp': match.metadata.get('timestamp', 0),
-                    'source': match.metadata.get('source', 'uploaded_notes')
-                })
-        
-        notes.sort(key=lambda x: x.get('chunk_index', 0))
+            metadata = match.metadata
+            if not metadata:
+                continue
+
+            text = metadata.get("text", "")
+            if not text:
+                continue
+
+            notes.append({
+                "id": match.id,
+                "text": text,
+                "chunk_index": metadata.get("chunk_index", 0),
+                "timestamp": metadata.get("timestamp", 0),
+                "source": metadata.get("source", "uploaded_notes"),
+            })
+
+        notes.sort(key=lambda item: item.get("chunk_index", 0))
         return notes
-    except Exception as e:
-        print(f"⚠️ Error fetching notes for {user_id}: {e}")
+
+    except Exception as exc:
+        print(f"⚠️ Failed to fetch notes for {user_id}: {exc}")
         return []
 
-# ============================================
-# GENERATE QUESTIONS FROM NOTES - NO FALLBACK
-# ============================================
 
-def generate_questions_from_notes(notes: List[Dict], num_questions: int = 25) -> List[str]:
-    """
-    Generate questions from notes using AI.
-    NO FALLBACK QUESTIONS - strictly AI-generated.
-    """
-    if not notes:
-        print("❌ No notes found - cannot generate questions!")
+# ============================================================
+# PER-USER QUESTION FILE MANAGEMENT
+# ============================================================
+
+def get_questions_file_path(user_id: str) -> str:
+    safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', user_id)
+    return os.path.join(QUESTIONS_DIR, f"questions_{safe_id}.txt")
+
+
+def parse_question_file(path: str) -> List[str]:
+    file_path = Path(path)
+    if not file_path.exists():
         return []
-    
-    full_text = " ".join([note['text'] for note in notes])
-    
+
+    questions = []
+
     try:
-        from groq import Groq as GroqClient
-        
-        client = GroqClient(api_key=GROQ_API_KEY)
-        
-        # Truncate if too long
-        if len(full_text) > 8000:
-            full_text = full_text[:8000]
-        
-        prompt = f"""Based on the following educational content, generate {num_questions} diverse and thoughtful questions.
+        content = file_path.read_text(encoding="utf-8")
+
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            line = re.sub(r"^\s*\d+\s*[\.\)]\s*", "", line)
+            line = line.strip(" -*\t")
+
+            if len(line) < 10:
+                continue
+
+            questions.append(line)
+
+        unique_questions = []
+        seen = set()
+
+        for question in questions:
+            key = question.lower().strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_questions.append(question)
+
+        return unique_questions
+
+    except Exception as exc:
+        print(f"❌ Failed reading {path}: {exc}")
+        return []
+
+
+def save_questions_to_file(user_id: str, questions: List[str]):
+    path = get_questions_file_path(user_id)
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            for i, q in enumerate(questions, 1):
+                f.write(f"{i}. {q}\n")
+        print(f"💾 Saved {len(questions)} questions to {path}")
+    except Exception as exc:
+        print(f"⚠️ Failed to write {path}: {exc}")
+
+
+# ============================================================
+# AI QUESTION GENERATION
+# ============================================================
+
+def generate_questions_from_notes(
+    notes: List[Dict],
+    num_questions: int = 25,
+) -> List[str]:
+
+    if not notes or num_questions <= 0:
+        return []
+
+    full_text = " ".join(note["text"] for note in notes)
+    if len(full_text) > 12000:
+        full_text = full_text[:12000]
+
+    client = Groq(api_key=GROQ_API_KEY)
+
+    prompt = f"""
+Based ONLY on the educational content below,
+generate exactly {num_questions} evaluation questions.
 
 CONTENT:
+
 {full_text}
 
-Generate exactly {num_questions} questions covering different aspects of the content.
-Questions should be:
-- Diverse in difficulty (basic to advanced)
-- Cover different topics from the content
-- Include conceptual, analytical, and application-based questions
-- Be clear and well-phrased
+Requirements:
 
-Output ONLY the questions as a numbered list (1 to {num_questions}):"""
+- Questions must be answerable from the content.
+- Cover different parts of the content.
+- Mix basic, conceptual, analytical and application questions.
+- Do not invent information outside the content.
+- Do not provide answers.
+- Output ONLY a numbered list.
+"""
 
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[
-                {"role": "system", "content": f"Generate exactly {num_questions} questions based on the provided content. Output only the numbered questions."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.8,
-            max_tokens=1500
-        )
-        
-        questions_text = response.choices[0].message.content.strip()
-        print(f"📝 AI Generated Questions Preview:\n{questions_text[:300]}...")
-        
-        # Parse questions
-        questions = []
-        for line in questions_text.split('\n'):
-            line = line.strip()
-            # Match numbered questions: 1. Question, 1) Question, etc.
-            match = re.match(r'^(\d+)[\.\)]?\s*(.*)', line)
-            if match:
-                question_text = match.group(2).strip()
-                if question_text and len(question_text) > 10:
-                    questions.append(question_text)
-            elif line and len(line) > 15 and '?' in line:
-                # If no number but has question mark
-                questions.append(line)
-        
-        # Verify we have enough questions
-        if len(questions) < num_questions:
-            print(f"⚠️ Only {len(questions)} questions generated, attempting to generate more...")
-            # Try one more time with a different prompt
-            more_questions = generate_more_questions(full_text, num_questions - len(questions))
-            questions.extend(more_questions)
-        
-        # Strictly limit to requested number, but only if we have them
-        if len(questions) >= num_questions:
-            questions = questions[:num_questions]
-            print(f"✅ Successfully generated {len(questions)} questions")
-            return questions
-        else:
-            print(f"❌ Failed to generate {num_questions} questions. Only got {len(questions)}")
-            return questions  # Return whatever we got, even if less than requested
-            
-    except Exception as e:
-        print(f"❌ Error generating questions: {e}")
-        return []  # Return empty list - NO FALLBACK QUESTIONS
+    for model_name in [QUESTION_MODEL, FALLBACK_QUESTION_MODEL]:
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": "Generate evaluation questions only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=QUESTION_MAX_TOKENS,
+            )
 
-def generate_more_questions(text: str, num_needed: int) -> List[str]:
-    """Generate additional questions if initial generation was insufficient"""
-    try:
-        from groq import Groq as GroqClient
-        
-        client = GroqClient(api_key=GROQ_API_KEY)
-        
-        prompt = f"""Based on this content, generate {num_needed} more diverse questions:
+            text = (response.choices[0].message.content or "").strip()
 
-CONTENT:
-{text[:3000]}
+            questions = []
+            for line in text.splitlines():
+                line = line.strip()
+                match = re.match(r"^\s*\d+\s*[\.\)]\s*(.+)", line)
+                if match:
+                    question = match.group(1).strip()
+                    if len(question) >= 10:
+                        questions.append(question)
 
-Generate {num_needed} additional questions covering different aspects of the content.
-Output ONLY the questions as a numbered list:"""
+            result = []
+            seen = set()
+            for question in questions:
+                key = question.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(question)
 
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[
-                {"role": "system", "content": f"Generate {num_needed} additional questions. Output only the numbered questions."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.8,
-            max_tokens=800
-        )
-        
-        questions_text = response.choices[0].message.content.strip()
-        questions = []
-        for line in questions_text.split('\n'):
-            line = line.strip()
-            match = re.match(r'^(\d+)[\.\)]?\s*(.*)', line)
-            if match:
-                question_text = match.group(2).strip()
-                if question_text and len(question_text) > 10:
-                    questions.append(question_text)
-        
-        print(f"✅ Generated {len(questions)} additional questions")
-        return questions
-    except Exception as e:
-        print(f"⚠️ Error generating more questions: {e}")
-        return []  # NO FALLBACK - return empty list
+            print(f"🤖 AI generated {len(result)} questions using {model_name}")
+            return result[:num_questions]
 
-# ============================================
-# MODEL ROUTER FOR FEEDBACK
-# ============================================
+        except Exception as exc:
+            print(f"⚠️ Question generation failed with {model_name}: {exc}")
+            if model_name == FALLBACK_QUESTION_MODEL:
+                return []
+            print("   Trying fallback model...")
+            continue
 
-class ModelRouter:
-    def __init__(self, api_key: str):
-        from groq import Groq as GroqClient
-        self.client = GroqClient(api_key=api_key)
-    
-    def call_model(self, prompt: str, model: str) -> float:
-        for attempt in range(3):
-            try:
-                response = self.client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "Output ONLY a number between 0 and 1."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0,
-                    max_tokens=10
-                )
-                text = response.choices[0].message.content.strip()
-                nums = re.findall(r'(\d+\.?\d*)', text)
-                if nums:
-                    score = float(nums[0])
-                    if score > 1 and score <= 100:
-                        score = score / 100
-                    return max(0.0, min(1.0, score))
-                time.sleep(2)
-            except Exception:
-                time.sleep(5)
-        return 0.5
+    return []
 
-# Global router
-_router = None
 
-def get_router():
-    global _router
-    if _router is None:
-        _router = ModelRouter(GROQ_API_KEY)
-    return _router
+# ============================================================
+# QUESTION SOURCE
+# ============================================================
 
-# ============================================
-# FEEDBACK FUNCTIONS - TRULENS METRICS
-# ============================================
+def get_or_generate_questions(
+    notes: List[Dict],
+    user_id: str,
+    target: int = 25,
+) -> List[str]:
 
-def feedback_relevance(input: str, output: str) -> float:
-    router = get_router()
-    return router.call_model(f"Score relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-20b")
+    print(f"\n🧠 Question planning for user {user_id} (target: {target})")
 
-def feedback_quality(input: str, output: str) -> float:
-    router = get_router()
-    return router.call_model(f"Score quality 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-20b")
+    path = get_questions_file_path(user_id)
+    existing = parse_question_file(path)
 
-def feedback_groundedness(input: str, output: str) -> float:
-    router = get_router()
-    return router.call_model(f"Score groundedness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-120b")
+    if existing:
+        print(f"📄 Loaded {len(existing)} existing questions from {path}")
+    else:
+        print(f"📄 No existing question file for {user_id} (will create one)")
 
-def feedback_context_relevance(input: str, output: str) -> float:
-    router = get_router()
-    return router.call_model(f"Score context relevance 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-20b")
+    if len(existing) >= target:
+        print(f"✅ Already have {len(existing)} questions (>= {target}), using file as-is")
+        return existing[:target]
 
-def feedback_correctness(input: str, output: str) -> float:
-    router = get_router()
-    return router.call_model(f"Score correctness 0-1.\nQ: {input[:300]}\nA: {output[:300]}\nScore:", "openai/gpt-oss-120b")
+    missing = target - len(existing)
+    print(f"📊 Have {len(existing)} questions, need {missing} more")
 
-# ============================================
-# OPTIMIZED RAG SYSTEM
-# ============================================
+    if not notes:
+        print("❌ No notes available to generate questions from!")
+        return existing if existing else []
+
+    print(f"🤖 Generating {missing} new questions from notes...")
+    new_questions = generate_questions_from_notes(notes, num_questions=missing)
+
+    if not new_questions:
+        print("⚠️ AI generation returned no questions")
+        return existing
+
+    combined = list(existing)
+    seen = set(q.lower().strip() for q in existing)
+
+    added = 0
+    for q in new_questions:
+        key = q.lower().strip()
+        if key not in seen:
+            seen.add(key)
+            combined.append(q)
+            added += 1
+
+    print(f"➕ Added {added} new unique questions (total: {len(combined)})")
+
+    save_questions_to_file(user_id, combined)
+    return combined[:target]
+
+
+# ============================================================
+# RAG APPLICATION
+# ============================================================
 
 class OptimizedRAG:
-    def __init__(self, pinecone_index, embed_model, llm, user_id: str = None):
+
+    def __init__(
+        self,
+        pinecone_index,
+        embed_model,
+        groq_client,
+        user_id: str,
+        total_notes: int = 0,
+    ):
         self.pinecone_index = pinecone_index
         self.embed_model = embed_model
-        self.llm = llm
+        self.groq_client = groq_client
         self.user_id = user_id
-        self.last_context = ""
-    
-    def query(self, question: str) -> str:
-        try:
-            query_embedding = self.embed_model._embed_text(question)
-            if not query_embedding:
-                return "No relevant documents found."
-            
-            filter_dict = {}
-            if self.user_id:
-                filter_dict["user_id"] = {"$eq": self.user_id}
-            
-            results = self.pinecone_index.query(
-                vector=query_embedding,
-                top_k=5,
-                include_metadata=True,
-                namespace="notes",
-                filter=filter_dict
-            )
-            
-            contexts = []
-            for match in results.matches:
-                if match.metadata and 'text' in match.metadata:
-                    contexts.append(match.metadata['text'][:800])
-            
-            if not contexts:
-                return "No relevant documents found for this user."
-            
-            self.last_context = " ".join(contexts[:3])
-            
-            prompt = f"""Answer based on context.
+        self.total_notes = total_notes
 
-CONTEXT:
-{chr(10).join(contexts)}
+        # LOCKED top_k=3 — proven optimal across 3 corpora
+        self.top_k = 3
+
+    @instrument(
+        span_type=SpanAttributes.SpanType.RETRIEVAL,
+        attributes={
+            SpanAttributes.RETRIEVAL.QUERY_TEXT: "question",
+            SpanAttributes.RETRIEVAL.RETRIEVED_CONTEXTS: "return",
+        },
+    )
+    def retrieve_context(self, question: str) -> List[str]:
+
+        embedding = self.embed_model.embed_query(question)
+        if not embedding:
+            return []
+
+        results = self.pinecone_index.query(
+            vector=embedding,
+            top_k=self.top_k,
+            include_metadata=True,
+            namespace="notes",
+            filter={"user_id": {"$eq": self.user_id}},
+        )
+
+        contexts = []
+        for match in results.matches:
+            metadata = match.metadata
+            if not metadata:
+                continue
+            text = metadata.get("text")
+            if not text:
+                continue
+            contexts.append(text[:800])
+
+        return contexts
+
+    @instrument(
+        attributes={
+            SpanAttributes.RECORD_ROOT.INPUT: "question",
+            SpanAttributes.RECORD_ROOT.OUTPUT: "return",
+        },
+    )
+    def query(self, question: str) -> str:
+
+        contexts = self.retrieve_context(question)
+
+        if not contexts:
+            return "I could not find relevant information in the user's notes."
+
+        context_text = "\n\n".join(contexts)
+
+        # SOFTER PROMPT — allows partial answers, only refuses when
+        # context is completely unrelated. Preserves groundedness.
+        prompt = f"""
+You are StudyBuddy, an educational AI assistant.
+
+Answer the user's question using ONLY the retrieved context.
+
+If the context fully answers the question, answer completely.
+If the context partially answers the question, give the partial answer
+and explicitly note what's missing.
+Only say "the notes don't contain this information" if the context is
+completely unrelated to the question.
+
+Never invent facts outside the context.
+
+RETRIEVED CONTEXT:
+
+{context_text}
 
 QUESTION:
+
 {question}
 
-ANSWER:"""
-            
-            response = self.llm.complete(prompt)
-            return str(response).strip()
-        except Exception as e:
-            return f"Error: {e}"
+ANSWER:
+"""
 
-# ============================================
-# DATABASE CLASS FOR STORAGE
-# ============================================
-
-class EvalDatabase:
-    def __init__(self, db_path="default.sqlite"):
-        self.db_path = db_path
-        self._init_db()
-    
-    def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Evaluations table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS evaluations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id TEXT,
-                user_id TEXT,
-                email TEXT,
-                question TEXT,
-                response TEXT,
-                relevance REAL,
-                quality REAL,
-                groundedness REAL,
-                context_relevance REAL,
-                correctness REAL,
-                timestamp TEXT,
-                status TEXT DEFAULT 'pending'
-            )
-        """)
-        
-        # Status table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS eval_status (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id TEXT,
-                total_users INTEGER DEFAULT 0,
-                completed_users INTEGER DEFAULT 0,
-                total_questions INTEGER DEFAULT 0,
-                completed_questions INTEGER DEFAULT 0,
-                current_user TEXT,
-                status TEXT DEFAULT 'idle',
-                message TEXT,
-                updated_at TEXT
-            )
-        """)
-        
-        conn.commit()
-        conn.close()
-        print("✅ Database tables initialized")
-    
-    def save_evaluation(self, data: Dict):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT INTO evaluations (
-                run_id, user_id, email, question, response,
-                relevance, quality, groundedness, context_relevance, correctness,
-                timestamp, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            data.get('run_id'),
-            data.get('user_id'),
-            data.get('email'),
-            data.get('question'),
-            data.get('response'),
-            data.get('relevance', 0),
-            data.get('quality', 0),
-            data.get('groundedness', 0),
-            data.get('context_relevance', 0),
-            data.get('correctness', 0),
-            data.get('timestamp', datetime.now().isoformat()),
-            data.get('status', 'completed')
-        ))
-        
-        conn.commit()
-        conn.close()
-    
-    def update_status(self, status: Dict):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT OR REPLACE INTO eval_status (
-                id, run_id, total_users, completed_users,
-                total_questions, completed_questions, current_user,
-                status, message, updated_at
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            status.get('run_id'),
-            status.get('total_users', 0),
-            status.get('completed_users', 0),
-            status.get('total_questions', 0),
-            status.get('completed_questions', 0),
-            status.get('current_user', ''),
-            status.get('status', 'idle'),
-            status.get('message', ''),
-            datetime.now().isoformat()
-        ))
-        
-        conn.commit()
-        conn.close()
-
-# ============================================
-# RUN EVALUATION - COMPLETE BEFORE DASHBOARD
-# ============================================
-
-def run_evaluation(users, pinecone_index, embed_model, llm):
-    """Run complete evaluation before launching dashboard"""
-    
-    print("\n" + "="*60)
-    print("📊 Running RAG Evaluation with TruLens...")
-    print("="*60)
-    
-    # Initialize database
-    db = EvalDatabase()
-    
-    # Initialize TruLens session
-    session = TruSession(database_url="sqlite:///default.sqlite")
-    print("✅ TruLens session initialized")
-    
-    # Update status
-    db.update_status({
-        'run_id': RUN_ID,
-        'total_users': len(users),
-        'completed_users': 0,
-        'total_questions': 0,
-        'completed_questions': 0,
-        'current_user': '',
-        'status': 'running',
-        'message': 'Starting evaluation...'
-    })
-    
-    total_questions = 0
-    all_tru_apps = []
-    
-    for user_idx, user in enumerate(users):
-        user_id = user['user_id']
-        email = user['email']
-        
-        print(f"\n{'='*60}")
-        print(f"👤 Evaluating user {user_idx+1}/{len(users)}: {email}")
-        print(f"{'='*60}")
-        
-        db.update_status({
-            'run_id': RUN_ID,
-            'total_users': len(users),
-            'completed_users': user_idx,
-            'total_questions': total_questions,
-            'completed_questions': total_questions,
-            'current_user': email,
-            'status': 'running',
-            'message': f'Evaluating user: {email}'
-        })
-        
-        # Get user notes
-        print(f"📚 Fetching notes for {email}...")
-        notes = fetch_user_notes(pinecone_index, user_id)
-        if not notes:
-            print(f"❌ No notes found for {email}, skipping user...")
-            continue
-        
-        print(f"✅ Found {len(notes)} notes")
-        
-        # Generate questions from notes - NO FALLBACK
-        print(f"🤖 Generating 25 questions from notes using AI...")
-        questions = generate_questions_from_notes(notes, num_questions=25)
-        
-        if not questions:
-            print(f"❌ No questions generated for {email}, skipping user...")
-            continue
-        
-        print(f"✅ Generated {len(questions)} questions for {email}")
-        
-        # Create RAG instance
-        rag = OptimizedRAG(pinecone_index, embed_model, llm, user_id=user_id)
-        
-        class RAGWrapper:
-            def __init__(self, rag_instance):
-                self.rag = rag_instance
-            
-            def respond(self, question: str) -> str:
-                return self.rag.query(question)
-        
-        rag_wrapper = RAGWrapper(rag)
-        
-        # Setup TruLens feedbacks - 5 metrics
-        print(f"🔧 Setting up TruLens feedbacks...")
-        f_relevance = Feedback(feedback_relevance, name="Relevance").on_input_output()
-        f_quality = Feedback(feedback_quality, name="Quality").on_input_output()
-        f_groundedness = Feedback(feedback_groundedness, name="Groundedness").on_input_output()
-        f_context_relevance = Feedback(feedback_context_relevance, name="Context Relevance").on_input_output()
-        f_correctness = Feedback(feedback_correctness, name="Correctness").on_input_output()
-        
-        # Create TruLens app
-        tru_app = TruApp(
-            rag_wrapper,
-            app_name=f"{APP_NAME}_{email}",
-            app_version="v1.0",
-            feedbacks=[
-                f_relevance, f_quality, f_groundedness,
-                f_context_relevance, f_correctness
+        response = self.groq_client.chat.completions.create(
+            model=RAG_MODEL,
+            messages=[
+                {"role": "system", "content": "Answer using only the supplied context."},
+                {"role": "user", "content": prompt},
             ],
-            main_method=rag_wrapper.respond
+            temperature=0.3,
+            max_tokens=RAG_MAX_TOKENS,
         )
-        
-        print(f"🔄 Evaluating {len(questions)} questions for {email}...")
-        print(f"{'='*60}")
-        
-        # Run evaluation with TruLens
-        with tru_app as recording:
-            for q_idx, question in enumerate(questions, 1):
-                print(f"📝 Question {q_idx}/{len(questions)}: {question[:80]}...")
-                
-                # Get response
-                response = rag_wrapper.respond(question)
-                
-                # Calculate scores
-                scores = {
-                    'relevance': feedback_relevance(question, response),
-                    'quality': feedback_quality(question, response),
-                    'groundedness': feedback_groundedness(question, response),
-                    'context_relevance': feedback_context_relevance(question, response),
-                    'correctness': feedback_correctness(question, response)
-                }
-                
-                # Print metrics
-                print(f"   📊 Relevance: {scores['relevance']:.3f} | Quality: {scores['quality']:.3f} | Groundedness: {scores['groundedness']:.3f}")
-                print(f"   📊 Context Relevance: {scores['context_relevance']:.3f} | Correctness: {scores['correctness']:.3f}")
-                print(f"   ✅ Response: {response[:100]}...")
-                print(f"{'-'*60}")
-                
-                # Save to database
-                eval_data = {
-                    'run_id': RUN_ID,
-                    'user_id': user_id,
-                    'email': email,
-                    'question': question,
-                    'response': response[:500],
-                    'timestamp': datetime.now().isoformat(),
-                    'status': 'completed',
-                    **scores
-                }
-                
-                db.save_evaluation(eval_data)
-                total_questions += 1
-                
-                # Update status every 5 questions
-                if q_idx % 5 == 0:
-                    db.update_status({
-                        'run_id': RUN_ID,
-                        'total_users': len(users),
-                        'completed_users': user_idx,
-                        'total_questions': total_questions,
-                        'completed_questions': total_questions,
-                        'current_user': email,
-                        'status': 'running',
-                        'message': f'Evaluated {total_questions} questions'
-                    })
-        
-        print(f"{'='*60}")
-        print(f"⏳ Waiting for TruLens feedback computation to complete for {email}...")
-        try:
-            tru_app.wait_for_feedback_results()
-            print(f"✅ TruLens feedbacks completed for {email}")
-        except Exception as e:
-            print(f"⚠️ Feedback wait error: {e}")
-        
-        all_tru_apps.append(tru_app)
-        
-        # Update status after user complete
-        db.update_status({
-            'run_id': RUN_ID,
-            'total_users': len(users),
-            'completed_users': user_idx + 1,
-            'total_questions': total_questions,
-            'completed_questions': total_questions,
-            'current_user': '',
-            'status': 'running',
-            'message': f'✅ Completed user {user_idx+1}/{len(users)}: {email}'
-        })
-        
-        print(f"✅ Completed evaluation for {email}")
-        print(f"{'='*60}\n")
-    
-    # Wait for any remaining feedbacks
-    if all_tru_apps:
-        print("\n⏳ Waiting for all TruLens feedbacks to complete...")
-        time.sleep(5)
-    
-    # Final status
-    db.update_status({
-        'run_id': RUN_ID,
-        'total_users': len(users),
-        'completed_users': len(users),
-        'total_questions': total_questions,
-        'completed_questions': total_questions,
-        'current_user': '',
-        'status': 'completed',
-        'message': f'✅ Evaluation complete! {total_questions} questions evaluated'
-    })
-    
-    print("\n" + "="*60)
-    print(f"✅ EVALUATION COMPLETE!")
-    print(f"📊 Total Users: {len(users)}")
-    print(f"📝 Total Questions: {total_questions}")
-    print(f"📁 Data saved to: default.sqlite")
-    print("="*60)
-    
-    return session, total_questions
 
-# ============================================
-# MAIN
-# ============================================
+        return (response.choices[0].message.content or "").strip()
+
+
+# ============================================================
+# TRULENS METRICS
+# ============================================================
+
+def create_metrics():
+    """
+    All 5 metrics → Cloudflare Workers AI.
+    Correctness + Answer Quality are now CONTEXT-AWARE.
+    """
+    if CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID:
+        provider = CloudflareProvider(
+            api_key=CLOUDFLARE_API_KEY,
+            account_id=CLOUDFLARE_ACCOUNT_ID,
+            model=CLOUDFLARE_MODEL,
+            max_tokens=CLOUDFLARE_MAX_TOKENS,
+        )
+        source = f"Cloudflare {CLOUDFLARE_MODEL}"
+
+        answer_relevance = Metric(
+            implementation=provider.relevance_with_cot_reasons,
+            name="Answer Relevance",
+            selectors={
+                "prompt": Selector.select_record_input(),
+                "response": Selector.select_record_output(),
+            },
+        )
+
+        # CONTEXT-AWARE: Answer Quality now receives retrieved context
+        answer_quality = Metric(
+            implementation=provider.coherence,
+            name="Answer Quality",
+            selectors={
+                "source": Selector.select_context(collect_list=True),
+                "text": Selector.select_record_output(),
+            },
+        )
+
+        context_relevance = Metric(
+            implementation=provider.context_relevance_with_cot_reasons,
+            name="Context Relevance",
+            selectors={
+                "question": Selector.select_record_input(),
+                "context": Selector.select_context(collect_list=False),
+            },
+        )
+
+        groundedness = Metric(
+            implementation=provider.groundedness_measure_with_cot_reasons,
+            name="Groundedness",
+            selectors={
+                "source": Selector.select_context(collect_list=True),
+                "statement": Selector.select_record_output(),
+            },
+        )
+
+        # CONTEXT-AWARE: Correctness now receives retrieved context
+        correctness = Metric(
+            implementation=provider.correctness,
+            name="Correctness",
+            selectors={
+                "source": Selector.select_context(collect_list=True),
+                "text": Selector.select_record_output(),
+            },
+        )
+
+        print(f"   All 5 metrics → {source}")
+        print(f"   Correctness + Answer Quality: CONTEXT-AWARE")
+
+        return [
+            answer_relevance,
+            answer_quality,
+            context_relevance,
+            groundedness,
+            correctness,
+        ]
+
+    # --------------------------------------------------------
+    # Fallback: Groq via LiteLLM
+    # --------------------------------------------------------
+    from trulens.providers.litellm import LiteLLM
+
+    fast_provider = LiteLLM(
+        model_engine=f"groq/{FAST_EVAL_MODEL}",
+        api_key=GROQ_API_KEY,
+    )
+
+    deep_provider = LiteLLM(
+        model_engine=f"groq/{DEEP_EVAL_MODEL}",
+        api_key=GROQ_API_KEY,
+    )
+
+    # LiteLLM's correctness/coherence accept source + text arguments
+    return [
+        Metric(
+            implementation=fast_provider.relevance_with_cot_reasons,
+            name="Answer Relevance",
+            selectors={
+                "prompt": Selector.select_record_input(),
+                "response": Selector.select_record_output(),
+            },
+        ),
+        Metric(
+            implementation=fast_provider.coherence,
+            name="Answer Quality",
+            selectors={
+                "source": Selector.select_context(collect_list=True),
+                "text": Selector.select_record_output(),
+            },
+        ),
+        Metric(
+            implementation=fast_provider.context_relevance_with_cot_reasons,
+            name="Context Relevance",
+            selectors={
+                "question": Selector.select_record_input(),
+                "context": Selector.select_context(collect_list=False),
+            },
+        ),
+        Metric(
+            implementation=deep_provider.groundedness_measure_with_cot_reasons,
+            name="Groundedness",
+            selectors={
+                "source": Selector.select_context(collect_list=True),
+                "statement": Selector.select_record_output(),
+            },
+        ),
+        Metric(
+            implementation=deep_provider.correctness,
+            name="Correctness",
+            selectors={
+                "source": Selector.select_context(collect_list=True),
+                "text": Selector.select_record_output(),
+            },
+        ),
+    ]
+
+
+# ============================================================
+# EXISTING QUESTIONS
+# ============================================================
+
+def get_existing_questions(session: TruSession) -> set:
+
+    if not SKIP_EXISTING_QUESTIONS:
+        return set()
+
+    try:
+        records, _ = session.get_records_and_feedback(
+            app_name=APP_NAME,
+            app_versions=[APP_VERSION],
+        )
+
+        if records is None or records.empty:
+            return set()
+
+        existing = set()
+
+        for col in ["input", "main_input"]:
+            if col in records.columns:
+                for value in records[col]:
+                    if isinstance(value, str):
+                        existing.add(value.strip().lower())
+
+        return existing
+
+    except Exception as exc:
+        print(f"⚠️ Could not read existing questions: {exc}")
+        return set()
+
+
+# ============================================================
+# EVALUATE ONE USER
+# ============================================================
+
+def evaluate_user(
+    session: TruSession,
+    pinecone_index,
+    embedding_model,
+    groq_client,
+    user: Dict,
+    metrics,
+) -> int:
+
+    user_id = user["user_id"]
+    email = user["email"]
+
+    print()
+    print("=" * 70)
+    print(f"👤 User: {email}")
+    print(f"🆔 User ID: {user_id}")
+    print("=" * 70)
+
+    notes = fetch_user_notes(pinecone_index, user_id)
+
+    if not notes:
+        print("❌ No notes found. Skipping user.")
+        return 0
+
+    total_notes = len(notes)
+    print(f"📚 Found {total_notes} note chunks")
+
+    questions = get_or_generate_questions(
+        notes=notes,
+        user_id=user_id,
+        target=QUESTIONS_PER_USER,
+    )
+
+    if not questions:
+        print("❌ No evaluation questions.")
+        return 0
+
+    existing_questions = get_existing_questions(session)
+
+    if existing_questions:
+        original_count = len(questions)
+        questions = [
+            q for q in questions
+            if q.strip().lower() not in existing_questions
+        ]
+        skipped = original_count - len(questions)
+        if skipped:
+            print(f"⏭️ Skipping {skipped} already evaluated questions.")
+
+    if not questions:
+        print("✅ No new questions to evaluate.")
+        return 0
+
+    print(f"📝 Questions to evaluate: {len(questions)}")
+
+    rag = OptimizedRAG(
+        pinecone_index=pinecone_index,
+        embed_model=embedding_model,
+        groq_client=groq_client,
+        user_id=user_id,
+        total_notes=total_notes,
+    )
+
+    tru_app = TruApp(
+        rag,
+        app_name=f"{APP_NAME} - {email}",
+        app_versions=APP_VERSION,
+        main_method=rag.query,
+        feedbacks=metrics,
+    )
+
+    completed = 0
+
+    for index, question in enumerate(questions, start=1):
+        print()
+        print(f"📝 Question {index}/{len(questions)}")
+        print(f"   {question}")
+
+        try:
+            with tru_app(conversation_id=f"{user_id}") as recording:
+                response = rag.query(question)
+
+            print(f"   ✅ Response: {response[:250]}...")
+
+            try:
+                recording.retrieve_feedback_results()
+                print("   📊 TruLens feedback completed.")
+            except Exception as feedback_error:
+                print(f"   ⚠️ Feedback is still processing: {feedback_error}")
+
+            completed += 1
+
+        except Exception as exc:
+            print(f"   ❌ Question failed: {exc}")
+
+        if index < len(questions):
+            print(f"   ⏳ Waiting {INTER_QUESTION_DELAY}s...")
+            time.sleep(INTER_QUESTION_DELAY)
+
+        print("-" * 70)
+
+    try:
+        session.force_flush()
+    except Exception:
+        pass
+
+    print()
+    print(f"✅ Completed {completed}/{len(questions)} questions for {email}")
+
+    return completed
+
+
+# ============================================================
+# MAIN EVALUATION
+# ============================================================
 
 def main():
-    print("\n" + "="*60)
-    print("🚀 Starting RAG Evaluation with TruLens")
-    print("="*60)
-    
-    # Verify TruLens is available
-    if not TRULENS_AVAILABLE:
-        print("❌ TruLens is REQUIRED but not available!")
-        print("💡 Install with: pip install trulens-eval")
-        sys.exit(1)
-    
-    # Initialize Pinecone
+
+    print()
+    print("=" * 70)
+    print("🚀 STARTING STUDYBUDDY RAG EVALUATION")
+    print("=" * 70)
+
     try:
-        pc = Pinecone(api_key=PINECONE_API_KEY)
-        pinecone_index = pc.Index(INDEX_NAME)
-        print(f"✅ Connected to Pinecone index: {INDEX_NAME}")
-    except Exception as e:
-        print(f"❌ Failed to connect to Pinecone: {e}")
-        return
-    
-    # Fetch users
+        pinecone_client = Pinecone(api_key=PINECONE_API_KEY)
+        pinecone_index = pinecone_client.Index(INDEX_NAME)
+        print(f"✅ Connected to Pinecone: {INDEX_NAME}")
+    except Exception as exc:
+        print(f"❌ Pinecone connection failed: {exc}")
+        sys.exit(1)
+
     users = fetch_all_users(pinecone_index)
-    
+
     if not users:
-        print("❌ No users found in Pinecone!")
-        return
-    
-    print(f"\n👥 Found {len(users)} users:")
-    for user in users[:5]:
-        print(f"  - {user['email']} ({user['user_id']})")
-    if len(users) > 5:
-        print(f"  ... and {len(users) - 5} more")
-    
-    # Initialize embedding and LLM
-    try:
-        embed_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
-        llm = LlamaGroq(model="openai/gpt-oss-120b", api_key=GROQ_API_KEY, temperature=0.3)
-        Settings.embed_model = embed_model
-        Settings.llm = llm
-        print("✅ Initialized embedding and LLM")
-    except Exception as e:
-        print(f"❌ Failed to initialize: {e}")
-        return
-    
-    # Run evaluation - COMPLETELY before dashboard
-    session, total_questions = run_evaluation(users, pinecone_index, embed_model, llm)
-    
-    if not session or total_questions == 0:
-        print("❌ Evaluation failed or no questions evaluated!")
-        return
-    
-    print("\n" + "="*60)
-    print(f"📊 Launching TruLens Dashboard on port {PORT}...")
-    print("="*60)
-    print(f"✅ TruLens Dashboard available at: http://localhost:{PORT}")
-    print(f"📁 Data in: default.sqlite")
-    print(f"📊 {total_questions} questions evaluated across {len(users)} users")
-    print("="*60)
-    
-    # Launch TruLens dashboard - THIS BLOCKS
-    try:
-        run_dashboard(session=session, port=PORT)
-    except KeyboardInterrupt:
-        print("\n👋 Shutting down...")
-        sys.exit(0)
-    except Exception as e:
-        print(f"\n❌ Dashboard error: {e}")
-        print("💡 Data is still saved in default.sqlite")
+        print("❌ No users discovered.")
         sys.exit(1)
+
+    print()
+    print(f"👥 Total users: {len(users)}")
+
+    for user in users:
+        print(f"   - {user['email']} ({user['user_id']})")
+
+    embedding_model = GeminiDirectEmbedding(api_key=GEMINI_API_KEY)
+    groq_client = Groq(api_key=GROQ_API_KEY)
+
+    print("✅ Gemini Embedding 2 initialized (with task prefix)")
+    print(f"✅ RAG model: {RAG_MODEL}")
+
+    print()
+    print("🦑 Connecting to TruLens database...")
+
+    session = TruSession(database_url=TRULENS_DB_URL)
+
+    print("✅ TruLens session connected")
+    print("🔧 Creating TruLens metrics...")
+
+    metrics = create_metrics()
+
+    print(f"✅ Created {len(metrics)} TruLens metrics")
+
+    total_completed = 0
+
+    for user in users:
+        completed = evaluate_user(
+            session=session,
+            pinecone_index=pinecone_index,
+            embedding_model=embedding_model,
+            groq_client=groq_client,
+            user=user,
+            metrics=metrics,
+        )
+        total_completed += completed
+
+    try:
+        session.force_flush()
+    except Exception:
+        pass
+
+    print()
+    print("=" * 70)
+    print("🎉 EVALUATION FINISHED")
+    print("=" * 70)
+    print(f"👥 Users discovered: {len(users)}")
+    print(f"📝 New questions evaluated: {total_completed}")
+    print(f"🦑 TruLens database: {TRULENS_DB_URL}")
+    print("=" * 70)
+
+    print()
+    print("📊 The TruLens dashboard remains available.")
+    print(
+        f"💡 Add new questions to "
+        f"{QUESTIONS_DIR}/questions_<user_id>.txt "
+        "and rerun the evaluator."
+    )
+
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n👋 Shutting down...")
+        print("\n👋 Evaluation stopped.")
         sys.exit(0)
+    except Exception as exc:
+        print()
+        print(f"❌ Fatal error: {exc}")
+        sys.exit(1)

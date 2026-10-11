@@ -1,0 +1,25 @@
+1. What concrete practice is described as a “rule to count how many items, e.g. on a tally stick, eventually abstracted into numbers”?
+2. How was the 3‑4‑5 right triangle used as a device in ancient times, and what physical tool aided its implementation?
+3. According to the text, which human language is noted as an exception for lacking words for the numerals “one” and “two”?
+4. Which animal is mentioned as being able to distinguish a surprising number of items, illustrating early numeric cognition?
+5. Name two mathematical operations that emerged after advances in numeral systems and mathematical notation, as cited in the passage.
+6. What algorithm is given as an example of a formally proven mathematical operation from the historical development of numbers?
+7. By which historical period had the positional Hindu‑Arabic numeral system reached Europe, enabling systematic computation?
+8. What types of mathematical functions were tabulated on paper during the High Middle Ages, according to the content?
+9. Which two 20th‑century scientists are referenced for using paper to perform calculations beyond the memory limits of their calculators?
+10. What is the earliest known tool for computation mentioned in the text, and around what dates was it invented?
+11. Describe the original style of usage for the Sumerian abacus.
+12. What Chinese invention from c. 1050‑771 BC is identified as the first known geared mechanism to use a differential gear?
+13. In the 3rd century BC, what mechanical principle did Archimedes employ to solve mathematical problems such as the “sand reckoner”?
+14. What is the significance of the Antikythera mechanism, and to approximately what year is it dated?
+15. Which Muslim mathematician is credited with introducing systematic concepts of algorithms and algebra, and what modern term derives from his name?
+16. What type of programmable machine did the Banū Mūsā brothers create, as noted in the passage?
+17. Which Majorcan philosopher designed logical machines that combined simple philosophical truths, and how were these machines ultimately realized?
+18. How did Gottfried Leibniz’s work relate to the earlier ideas of Ramon Llull, according to the article?
+19. What two Babbage engines are highlighted as the apex of early mechanical computing, and which one was successfully reconstructed in 2002?
+20. List three modern computer‑like features that the Analytical Engine would have possessed if it had been built as designed.
+21. What material constraints were observed by the 2002 reconstruction team when building Babbage’s Difference Engine?
+22. According to the content, what key advancement distinguished Babbage’s devices from earlier mechanical computers?
+23. How does the passage define the role of “mathematical statements” in the development of repeatable, verifiable scientific knowledge?
+24. Explain how the concept of “one‑to‑one correspondence” evolved from a concrete practice to an abstract numerical idea, based on the text.
+25. Identify two examples of how early computation devices (e.g., abacus, Antikythera mechanism) incorporated physical representations of mathematical concepts.
