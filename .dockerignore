@@ -3,3 +3,5 @@ __pycache__
 *.pyc
 .git
 *.md
+data/
+*.sqlite
