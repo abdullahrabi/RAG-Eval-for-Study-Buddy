@@ -87,7 +87,7 @@ if __name__ == "__main__":
 
     dashboard_process = subprocess.Popen(
         [sys.executable, "Dashboard.py"]
-    )
+    ) 
 
     # =========================================================
     # 2. WAIT FOR DASHBOARD
